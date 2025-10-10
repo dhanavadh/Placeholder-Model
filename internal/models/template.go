@@ -18,6 +18,7 @@ type Template struct {
 	MimeType     string         `json:"mime_type"`
 	Placeholders string         `gorm:"type:json" json:"placeholders"` // JSON array of placeholder strings
 	Positions    string         `gorm:"type:json" json:"positions"`    // JSON array of placeholder positions
+	Aliases      string         `gorm:"type:json" json:"aliases"`      // JSON object mapping placeholders to aliases
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`

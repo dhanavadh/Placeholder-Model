@@ -44,12 +44,13 @@ type ProcessRequest struct {
 }
 
 type UploadResponse struct {
-	TemplateID   string   `json:"template_id"`
-	FileName     string   `json:"file_name"`
-	Description  string   `json:"description"`
-	Author       string   `json:"author"`
-	Placeholders []string `json:"placeholders"`
-	Message      string   `json:"message"`
+	TemplateID   string            `json:"template_id"`
+	FileName     string            `json:"file_name"`
+	Description  string            `json:"description"`
+	Author       string            `json:"author"`
+	Placeholders []string          `json:"placeholders"`
+	Aliases      map[string]string `json:"aliases,omitempty"`
+	Message      string            `json:"message"`
 }
 
 type ProcessResponse struct {
@@ -77,6 +78,7 @@ func (h *DocxHandler) UploadTemplate(c *gin.Context) {
 	fileName := c.PostForm("fileName")
 	description := c.PostForm("description")
 	author := c.PostForm("author")
+	aliasesJSON := c.PostForm("aliases") // Optional: JSON object mapping placeholders to aliases
 
 	if fileName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "fileName is required"})
@@ -91,7 +93,16 @@ func (h *DocxHandler) UploadTemplate(c *gin.Context) {
 		return
 	}
 
-	template, err := h.templateService.UploadTemplateWithMetadata(c.Request.Context(), file, header, fileName, description, author)
+	// Parse aliases if provided
+	var aliases map[string]string
+	if aliasesJSON != "" {
+		if err := json.Unmarshal([]byte(aliasesJSON), &aliases); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid aliases JSON format"})
+			return
+		}
+	}
+
+	template, err := h.templateService.UploadTemplateWithMetadata(c.Request.Context(), file, header, fileName, description, author, aliases)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to upload template: %v", err)})
 		return
@@ -104,12 +115,22 @@ func (h *DocxHandler) UploadTemplate(c *gin.Context) {
 		return
 	}
 
+	// Parse aliases from JSON if available
+	var responseAliases map[string]string
+	if template.Aliases != "" {
+		if err := json.Unmarshal([]byte(template.Aliases), &responseAliases); err != nil {
+			// If parsing fails, just don't include aliases in response
+			responseAliases = nil
+		}
+	}
+
 	response := UploadResponse{
 		TemplateID:   template.ID,
 		FileName:     template.DisplayName,
 		Description:  template.Description,
 		Author:       template.Author,
 		Placeholders: placeholders,
+		Aliases:      responseAliases,
 		Message:      "Template uploaded successfully",
 	}
 
@@ -242,6 +263,67 @@ func (h *DocxHandler) DownloadDocument(c *gin.Context) {
 			fmt.Printf("Warning: failed to delete processed file for document %s: %v\n", documentID, err)
 		}
 	}()
+}
+
+func (h *DocxHandler) DeleteTemplate(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	err := h.templateService.DeleteTemplate(c.Request.Context(), templateID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to delete template: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Template deleted successfully"})
+}
+
+type UpdateTemplateRequest struct {
+	DisplayName string            `json:"display_name"`
+	Description string            `json:"description"`
+	Author      string            `json:"author"`
+	Aliases     map[string]string `json:"aliases,omitempty"`
+}
+
+func (h *DocxHandler) UpdateTemplate(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	var req UpdateTemplateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
+		return
+	}
+
+	if req.DisplayName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "display_name is required"})
+		return
+	}
+	if req.Description == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "description is required"})
+		return
+	}
+	if req.Author == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "author is required"})
+		return
+	}
+
+	template, err := h.templateService.UpdateTemplate(c.Request.Context(), templateID, req.DisplayName, req.Description, req.Author, req.Aliases)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update template: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "Template updated successfully",
+		"template": template,
+	})
 }
 
 // Legacy functions for backward compatibility - these will be removed

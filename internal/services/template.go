@@ -27,10 +27,10 @@ func NewTemplateService(gcsClient *storage.GCSClient) *TemplateService {
 }
 
 func (s *TemplateService) UploadTemplate(ctx context.Context, file multipart.File, header *multipart.FileHeader) (*models.Template, error) {
-	return s.UploadTemplateWithMetadata(ctx, file, header, header.Filename, "", "")
+	return s.UploadTemplateWithMetadata(ctx, file, header, header.Filename, "", "", nil)
 }
 
-func (s *TemplateService) UploadTemplateWithMetadata(ctx context.Context, file multipart.File, header *multipart.FileHeader, fileName, description, author string) (*models.Template, error) {
+func (s *TemplateService) UploadTemplateWithMetadata(ctx context.Context, file multipart.File, header *multipart.FileHeader, fileName, description, author string, aliases map[string]string) (*models.Template, error) {
 	templateID := uuid.New().String()
 	objectName := storage.GenerateObjectName(templateID, header.Filename)
 
@@ -85,6 +85,16 @@ func (s *TemplateService) UploadTemplateWithMetadata(ctx context.Context, file m
 		return nil, fmt.Errorf("failed to marshal positions: %w", err)
 	}
 
+	// Convert aliases to JSON (if provided)
+	var aliasesJSON []byte
+	if aliases != nil && len(aliases) > 0 {
+		aliasesJSON, err = json.Marshal(aliases)
+		if err != nil {
+			s.gcsClient.DeleteFile(ctx, objectName)
+			return nil, fmt.Errorf("failed to marshal aliases: %w", err)
+		}
+	}
+
 	// Save to database
 	template := &models.Template{
 		ID:           templateID,
@@ -98,6 +108,7 @@ func (s *TemplateService) UploadTemplateWithMetadata(ctx context.Context, file m
 		MimeType:     header.Header.Get("Content-Type"),
 		Placeholders: string(placeholdersJSON),
 		Positions:    string(positionsJSON),
+		Aliases:      string(aliasesJSON),
 	}
 
 	if err := internal.DB.Create(template).Error; err != nil {
@@ -168,6 +179,34 @@ func (s *TemplateService) DeleteTemplate(ctx context.Context, templateID string)
 
 	// Soft delete from database
 	return internal.DB.Delete(template).Error
+}
+
+func (s *TemplateService) UpdateTemplate(ctx context.Context, templateID, displayName, description, author string, aliases map[string]string) (*models.Template, error) {
+	template, err := s.GetTemplate(templateID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update fields
+	template.DisplayName = displayName
+	template.Description = description
+	template.Author = author
+
+	// Convert aliases to JSON (if provided)
+	if aliases != nil {
+		aliasesJSON, err := json.Marshal(aliases)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal aliases: %w", err)
+		}
+		template.Aliases = string(aliasesJSON)
+	}
+
+	// Save to database
+	if err := internal.DB.Save(template).Error; err != nil {
+		return nil, fmt.Errorf("failed to update template: %w", err)
+	}
+
+	return template, nil
 }
 
 func (s *TemplateService) createTempFile(reader io.Reader) (string, error) {
