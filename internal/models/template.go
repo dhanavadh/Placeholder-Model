@@ -14,6 +14,7 @@ type Template struct {
 	Description  string         `json:"description"`
 	Author       string         `json:"author"`
 	GCSPath      string         `gorm:"column:gcs_path_docx" json:"gcs_path"`
+	GCSPathHTML  string         `gorm:"column:gcs_path_html" json:"gcs_path_html"`    // Path to HTML preview file
 	FileSize     int64          `json:"file_size"`
 	MimeType     string         `json:"mime_type"`
 	Placeholders string         `gorm:"type:json" json:"placeholders"` // JSON array of placeholder strings

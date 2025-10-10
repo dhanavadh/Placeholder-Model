@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"DF-PLCH/internal/models"
@@ -74,6 +76,23 @@ func (h *DocxHandler) UploadTemplate(c *gin.Context) {
 		return
 	}
 
+	// Get optional HTML file for preview
+	var htmlFile multipart.File
+	var htmlHeader *multipart.FileHeader
+	htmlFile, htmlHeader, err = c.Request.FormFile("htmlPreview")
+	if err == nil {
+		// HTML file was provided
+		defer htmlFile.Close()
+		if filepath.Ext(htmlHeader.Filename) != ".html" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Preview file must be .html"})
+			return
+		}
+	} else {
+		// HTML file is optional, so err == nil means it wasn't provided
+		htmlFile = nil
+		htmlHeader = nil
+	}
+
 	// Get required fields from form
 	fileName := c.PostForm("fileName")
 	description := c.PostForm("description")
@@ -102,7 +121,7 @@ func (h *DocxHandler) UploadTemplate(c *gin.Context) {
 		}
 	}
 
-	template, err := h.templateService.UploadTemplateWithMetadata(c.Request.Context(), file, header, fileName, description, author, aliases)
+	template, err := h.templateService.UploadTemplateWithHTMLPreview(c.Request.Context(), file, header, htmlFile, htmlHeader, fileName, description, author, aliases)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to upload template: %v", err)})
 		return
@@ -189,6 +208,34 @@ func (h *DocxHandler) GetPlaceholderPositions(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+func (h *DocxHandler) GetHTMLPreview(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	template, err := h.templateService.GetTemplate(templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
+		return
+	}
+
+	if template.GCSPathHTML == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No HTML preview available for this template"})
+		return
+	}
+
+	// Get HTML content from GCS
+	htmlContent, err := h.templateService.GetHTMLPreview(c.Request.Context(), template.GCSPathHTML)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to retrieve HTML preview: %v", err)})
+		return
+	}
+
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(htmlContent))
 }
 
 func (h *DocxHandler) ProcessDocument(c *gin.Context) {
@@ -295,35 +342,95 @@ func (h *DocxHandler) UpdateTemplate(c *gin.Context) {
 		return
 	}
 
-	var req UpdateTemplateRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
-		return
-	}
+	// Check if this is a multipart form (for HTML file upload) or JSON
+	contentType := c.GetHeader("Content-Type")
 
-	if req.DisplayName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "display_name is required"})
-		return
-	}
-	if req.Description == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "description is required"})
-		return
-	}
-	if req.Author == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "author is required"})
-		return
-	}
+	if contentType == "application/json" || !strings.Contains(contentType, "multipart/form-data") {
+		// JSON update (no HTML file)
+		var req UpdateTemplateRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
+			return
+		}
 
-	template, err := h.templateService.UpdateTemplate(c.Request.Context(), templateID, req.DisplayName, req.Description, req.Author, req.Aliases)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update template: %v", err)})
-		return
-	}
+		if req.DisplayName == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "display_name is required"})
+			return
+		}
+		if req.Description == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "description is required"})
+			return
+		}
+		if req.Author == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "author is required"})
+			return
+		}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":  "Template updated successfully",
-		"template": template,
-	})
+		template, err := h.templateService.UpdateTemplate(c.Request.Context(), templateID, req.DisplayName, req.Description, req.Author, req.Aliases, nil, nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update template: %v", err)})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":  "Template updated successfully",
+			"template": template,
+		})
+	} else {
+		// Multipart form update (with optional HTML file)
+		displayName := c.PostForm("displayName")
+		description := c.PostForm("description")
+		author := c.PostForm("author")
+		aliasesJSON := c.PostForm("aliases")
+
+		if displayName == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "displayName is required"})
+			return
+		}
+		if description == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "description is required"})
+			return
+		}
+		if author == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "author is required"})
+			return
+		}
+
+		// Parse aliases if provided
+		var aliases map[string]string
+		if aliasesJSON != "" {
+			if err := json.Unmarshal([]byte(aliasesJSON), &aliases); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid aliases JSON format"})
+				return
+			}
+		}
+
+		// Get optional HTML file
+		var htmlFile multipart.File
+		var htmlHeader *multipart.FileHeader
+		htmlFile, htmlHeader, err := c.Request.FormFile("htmlPreview")
+		if err == nil {
+			defer htmlFile.Close()
+			if filepath.Ext(htmlHeader.Filename) != ".html" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Preview file must be .html"})
+				return
+			}
+		} else {
+			htmlFile = nil
+			htmlHeader = nil
+		}
+
+		template, err := h.templateService.UpdateTemplate(c.Request.Context(), templateID, displayName, description, author, aliases, htmlFile, htmlHeader)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update template: %v", err)})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":  "Template updated successfully",
+			"template": template,
+		})
+	}
 }
 
 // Legacy functions for backward compatibility - these will be removed

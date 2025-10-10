@@ -99,6 +99,7 @@ func autoMigrate() error {
 		"placeholders":  "ALTER TABLE document_templates ADD COLUMN placeholders json",
 		"positions":     "ALTER TABLE document_templates ADD COLUMN positions json",
 		"aliases":       "ALTER TABLE document_templates ADD COLUMN aliases json",
+		"gcs_path_html": "ALTER TABLE document_templates ADD COLUMN gcs_path_html longtext",
 		"created_at":    "ALTER TABLE document_templates ADD COLUMN created_at datetime(3) NULL",
 		"updated_at":    "ALTER TABLE document_templates ADD COLUMN updated_at datetime(3) NULL",
 		"deleted_at":    "ALTER TABLE document_templates ADD COLUMN deleted_at datetime(3) NULL",

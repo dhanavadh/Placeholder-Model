@@ -31,13 +31,29 @@ func (s *TemplateService) UploadTemplate(ctx context.Context, file multipart.Fil
 }
 
 func (s *TemplateService) UploadTemplateWithMetadata(ctx context.Context, file multipart.File, header *multipart.FileHeader, fileName, description, author string, aliases map[string]string) (*models.Template, error) {
+	return s.UploadTemplateWithHTMLPreview(ctx, file, header, nil, nil, fileName, description, author, aliases)
+}
+
+func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, file multipart.File, header *multipart.FileHeader, htmlFile multipart.File, htmlHeader *multipart.FileHeader, fileName, description, author string, aliases map[string]string) (*models.Template, error) {
 	templateID := uuid.New().String()
 	objectName := storage.GenerateObjectName(templateID, header.Filename)
 
-	// Upload to GCS
+	// Upload DOCX to GCS
 	result, err := s.gcsClient.UploadFile(ctx, file, objectName, header.Header.Get("Content-Type"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload to GCS: %w", err)
+	}
+
+	// Upload HTML preview file if provided
+	var htmlObjectName string
+	if htmlFile != nil && htmlHeader != nil {
+		htmlObjectName = storage.GenerateObjectName(templateID, htmlHeader.Filename)
+		_, err := s.gcsClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
+		if err != nil {
+			// Clean up DOCX file on error
+			s.gcsClient.DeleteFile(ctx, objectName)
+			return nil, fmt.Errorf("failed to upload HTML preview to GCS: %w", err)
+		}
 	}
 
 	// Create temp file for processing
@@ -85,16 +101,6 @@ func (s *TemplateService) UploadTemplateWithMetadata(ctx context.Context, file m
 		return nil, fmt.Errorf("failed to marshal positions: %w", err)
 	}
 
-	// Convert aliases to JSON (if provided)
-	var aliasesJSON []byte
-	if aliases != nil && len(aliases) > 0 {
-		aliasesJSON, err = json.Marshal(aliases)
-		if err != nil {
-			s.gcsClient.DeleteFile(ctx, objectName)
-			return nil, fmt.Errorf("failed to marshal aliases: %w", err)
-		}
-	}
-
 	// Save to database
 	template := &models.Template{
 		ID:           templateID,
@@ -104,11 +110,24 @@ func (s *TemplateService) UploadTemplateWithMetadata(ctx context.Context, file m
 		Description:  description,
 		Author:       author,
 		GCSPath:      objectName,
+		GCSPathHTML:  htmlObjectName,
 		FileSize:     result.Size,
 		MimeType:     header.Header.Get("Content-Type"),
 		Placeholders: string(placeholdersJSON),
 		Positions:    string(positionsJSON),
-		Aliases:      string(aliasesJSON),
+	}
+
+	// Convert aliases to JSON (if provided)
+	if aliases != nil && len(aliases) > 0 {
+		aliasesBytes, err := json.Marshal(aliases)
+		if err != nil {
+			s.gcsClient.DeleteFile(ctx, objectName)
+			return nil, fmt.Errorf("failed to marshal aliases: %w", err)
+		}
+		template.Aliases = string(aliasesBytes)
+	} else {
+		// Store empty JSON object for no aliases (valid JSON)
+		template.Aliases = "{}"
 	}
 
 	if err := internal.DB.Create(template).Error; err != nil {
@@ -181,7 +200,7 @@ func (s *TemplateService) DeleteTemplate(ctx context.Context, templateID string)
 	return internal.DB.Delete(template).Error
 }
 
-func (s *TemplateService) UpdateTemplate(ctx context.Context, templateID, displayName, description, author string, aliases map[string]string) (*models.Template, error) {
+func (s *TemplateService) UpdateTemplate(ctx context.Context, templateID, displayName, description, author string, aliases map[string]string, htmlFile multipart.File, htmlHeader *multipart.FileHeader) (*models.Template, error) {
 	template, err := s.GetTemplate(templateID)
 	if err != nil {
 		return nil, err
@@ -199,6 +218,25 @@ func (s *TemplateService) UpdateTemplate(ctx context.Context, templateID, displa
 			return nil, fmt.Errorf("failed to marshal aliases: %w", err)
 		}
 		template.Aliases = string(aliasesJSON)
+	}
+
+	// Upload HTML preview file if provided
+	if htmlFile != nil && htmlHeader != nil {
+		htmlObjectName := storage.GenerateObjectName(templateID, htmlHeader.Filename)
+		_, err := s.gcsClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload HTML preview to GCS: %w", err)
+		}
+
+		// Delete old HTML file if exists
+		if template.GCSPathHTML != "" {
+			if err := s.gcsClient.DeleteFile(ctx, template.GCSPathHTML); err != nil {
+				// Log but don't fail on deletion error
+				fmt.Printf("Warning: failed to delete old HTML file %s: %v\n", template.GCSPathHTML, err)
+			}
+		}
+
+		template.GCSPathHTML = htmlObjectName
 	}
 
 	// Save to database
@@ -227,4 +265,19 @@ func (s *TemplateService) createTempFile(reader io.Reader) (string, error) {
 
 func (s *TemplateService) cleanupTempFile(filePath string) {
 	os.Remove(filePath)
+}
+
+func (s *TemplateService) GetHTMLPreview(ctx context.Context, gcsPath string) (string, error) {
+	reader, err := s.gcsClient.ReadFile(ctx, gcsPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read HTML preview from GCS: %w", err)
+	}
+	defer reader.Close()
+
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("failed to read HTML preview content: %w", err)
+	}
+
+	return string(content), nil
 }
