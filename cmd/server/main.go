@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"syscall"
 	"time"
 
@@ -17,7 +16,6 @@ import (
 	"DF-PLCH/internal/services"
 	"DF-PLCH/internal/storage"
 
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -72,47 +70,48 @@ func main() {
 	r.Use(activityLogService.LoggingMiddleware())
 
 	// CORS middleware
-	corsConfig := cors.DefaultConfig()
-
-	// Handle wildcard configuration
-	if slices.Contains(cfg.Server.AllowOrigins, "*") {
-		corsConfig.AllowAllOrigins = true
-	} else {
-		// Prepare allowed origins with development localhost support
-		allowedOrigins := make([]string, 0, len(cfg.Server.AllowOrigins))
-
-		// Add configured origins
-		for _, origin := range cfg.Server.AllowOrigins {
-			if origin != "" {
-				allowedOrigins = append(allowedOrigins, origin)
-			}
-		}
-
-		// Add localhost origins in development mode
-		if cfg.Server.Environment == "development" {
-			localhostOrigins := []string{
-				"http://localhost:3001",
-				"http://localhost:3001",
-				"http://localhost:5173",
-				"http://localhost:8080",
-			}
-
-			// Only add localhost origins that aren't already in the list
-			for _, localhost := range localhostOrigins {
-				if !slices.Contains(allowedOrigins, localhost) {
-					allowedOrigins = append(allowedOrigins, localhost)
-				}
-			}
-		}
-
-		corsConfig.AllowOrigins = allowedOrigins
-	}
-
-	corsConfig.AllowCredentials = true
-	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
-	corsConfig.AllowHeaders = []string{"Content-Type", "Authorization"}
-
-	r.Use(cors.New(corsConfig))
+	// CORS is handled by the API Gateway, so we disable it here to avoid conflicts
+	// corsConfig := cors.DefaultConfig()
+	//
+	// // Handle wildcard configuration
+	// if slices.Contains(cfg.Server.AllowOrigins, "*") {
+	// 	corsConfig.AllowAllOrigins = true
+	// } else {
+	// 	// Prepare allowed origins with development localhost support
+	// 	allowedOrigins := make([]string, 0, len(cfg.Server.AllowOrigins))
+	//
+	// 	// Add configured origins
+	// 	for _, origin := range cfg.Server.AllowOrigins {
+	// 		if origin != "" {
+	// 			allowedOrigins = append(allowedOrigins, origin)
+	// 		}
+	// 	}
+	//
+	// 	// Add localhost origins in development mode
+	// 	if cfg.Server.Environment == "development" {
+	// 		localhostOrigins := []string{
+	// 			"http://localhost:3001",
+	// 			"http://localhost:3001",
+	// 			"http://localhost:5173",
+	// 			"http://localhost:8080",
+	// 		}
+	//
+	// 		// Only add localhost origins that aren't already in the list
+	// 		for _, localhost := range localhostOrigins {
+	// 			if !slices.Contains(allowedOrigins, localhost) {
+	// 				allowedOrigins = append(allowedOrigins, localhost)
+	// 			}
+	// 		}
+	// 	}
+	//
+	// 	corsConfig.AllowOrigins = allowedOrigins
+	// }
+	//
+	// corsConfig.AllowCredentials = true
+	// corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	// corsConfig.AllowHeaders = []string{"Content-Type", "Authorization"}
+	//
+	// r.Use(cors.New(corsConfig))
 
 	// Health check endpoint
 	r.GET("/health", func(c *gin.Context) {
