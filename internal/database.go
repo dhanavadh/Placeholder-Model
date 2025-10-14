@@ -188,17 +188,43 @@ func autoMigrate() error {
             query_params text,
             status_code int NOT NULL,
             response_time bigint NOT NULL,
+            user_id varchar(36),
+            user_email varchar(255),
             created_at datetime(3) NULL,
             updated_at datetime(3) NULL,
             deleted_at datetime(3) NULL,
             INDEX idx_activity_logs_deleted_at (deleted_at),
             INDEX idx_activity_logs_method (method),
             INDEX idx_activity_logs_path (path),
-            INDEX idx_activity_logs_created_at (created_at)
+            INDEX idx_activity_logs_created_at (created_at),
+            INDEX idx_activity_logs_user_id (user_id),
+            INDEX idx_activity_logs_user_email (user_email)
         )
     `)
 	if result.Error != nil {
 		return fmt.Errorf("failed to create activity_logs table: %w", result.Error)
+	}
+
+	// Ensure user columns exist in activity_logs for existing tables
+	ensureActivityLogsColumns := map[string]string{
+		"user_id":    "ALTER TABLE activity_logs ADD COLUMN user_id varchar(36)",
+		"user_email": "ALTER TABLE activity_logs ADD COLUMN user_email varchar(255)",
+	}
+
+	for column, stmt := range ensureActivityLogsColumns {
+		if err := ensureColumn("activity_logs", column, stmt); err != nil {
+			return err
+		}
+	}
+
+	// Ensure indexes exist
+	if !DB.Migrator().HasIndex("activity_logs", "idx_activity_logs_user_id") {
+		fmt.Println("Adding index idx_activity_logs_user_id...")
+		DB.Exec("CREATE INDEX idx_activity_logs_user_id ON activity_logs(user_id)")
+	}
+	if !DB.Migrator().HasIndex("activity_logs", "idx_activity_logs_user_email") {
+		fmt.Println("Adding index idx_activity_logs_user_email...")
+		DB.Exec("CREATE INDEX idx_activity_logs_user_email ON activity_logs(user_email)")
 	}
 
 	fmt.Println("Tables created/verified successfully")

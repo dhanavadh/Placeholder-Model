@@ -62,6 +62,19 @@ func (s *ActivityLogService) LogRequest(c *gin.Context, statusCode int, response
 	// Convert query params to JSON string
 	queryParamsJSON, _ := json.Marshal(queryParams)
 
+	// Get user information from JWT token (set by gateway)
+	var userID, userEmail string
+	if uid, exists := c.Get("user_id"); exists {
+		if uidStr, ok := uid.(string); ok {
+			userID = uidStr
+		}
+	}
+	if email, exists := c.Get("user_email"); exists {
+		if emailStr, ok := email.(string); ok {
+			userEmail = emailStr
+		}
+	}
+
 	// Create activity log entry
 	activityLog := &models.ActivityLog{
 		ID:           uuid.New().String(),
@@ -73,6 +86,8 @@ func (s *ActivityLogService) LogRequest(c *gin.Context, statusCode int, response
 		QueryParams:  string(queryParamsJSON),
 		StatusCode:   statusCode,
 		ResponseTime: responseTime.Milliseconds(),
+		UserID:       userID,
+		UserEmail:    userEmail,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -166,6 +181,14 @@ func (s *ActivityLogService) GetLogsByPath(path string, limit int, offset int) (
 func (s *ActivityLogService) LoggingMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
+
+		// Extract user information from headers (set by gateway)
+		if userID := c.GetHeader("X-User-ID"); userID != "" {
+			c.Set("user_id", userID)
+		}
+		if userEmail := c.GetHeader("X-User-Email"); userEmail != "" {
+			c.Set("user_email", userEmail)
+		}
 
 		// Capture request body for POST requests
 		if c.Request.Method == "POST" && c.Request.Body != nil {
