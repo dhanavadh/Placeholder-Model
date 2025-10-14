@@ -62,7 +62,7 @@ jobs:
           cat > env-vars.yaml << EOF
           SERVER_PORT: "8081"
           ENVIRONMENT: "production"
-          DB_HOST: "/cloudsql/${CLOUD_SQL_CONNECTION_NAME}"
+          DB_HOST: "10.83.16.3"
           DB_PORT: "3306"
           DB_USER: "${DB_USER}"
           DB_PASSWORD: "${DB_PASSWORD}"
@@ -89,7 +89,7 @@ jobs:
             --service-account=${{ secrets.CLOUD_RUN_SERVICE_ACCOUNT }} \
             --vpc-connector=dooform-vpc-connector \
             --vpc-egress=all \
-            --add-cloudsql-instances=${CLOUD_SQL_CONNECTION_NAME} \
+
             --execution-environment=gen2 \
             --env-vars-file=env-vars.yaml \
             --labels=managed-by=github-actions,commit-sha=${{ github.sha }} \
