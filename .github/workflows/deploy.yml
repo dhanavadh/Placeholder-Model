@@ -80,7 +80,7 @@ jobs:
             --image ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.SERVICE }}:${{ github.sha }} \
             --platform managed \
             --region ${{ env.REGION }} \
-            --allow-unauthenticated \
+            --no-allow-unauthenticated \
             --port=8081 \
             --memory=512Mi \
             --cpu=1 \
