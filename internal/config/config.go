@@ -45,12 +45,12 @@ type GotenbergConfig struct {
 func (d *DatabaseConfig) DSN() string {
 	// Cloud SQL Unix socket support
 	if len(d.Host) > 0 && d.Host[0] == '/' {
-		return fmt.Sprintf("%s:%s@unix(%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-			d.User, d.Password, d.Host, d.DBName)
+		return fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable",
+			d.Host, d.User, d.Password, d.DBName)
 	}
 	// Standard TCP connection
-	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		d.User, d.Password, d.Host, d.Port, d.DBName)
+	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		d.Host, d.Port, d.User, d.Password, d.DBName)
 }
 
 // findProjectRoot finds the project root by looking for go.mod file
@@ -101,8 +101,8 @@ func Load() (*Config, error) {
 		},
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
-			Port:     getEnv("DB_PORT", "3306"),
-			User:     getEnv("DB_USER", "root"),
+			Port:     getEnv("DB_PORT", "5432"),
+			User:     getEnv("DB_USER", "postgres"),
 			Password: getEnv("DB_PASSWORD", ""),
 			DBName:   getEnv("DB_NAME", "df_plch"),
 		},
