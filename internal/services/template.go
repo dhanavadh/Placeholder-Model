@@ -80,25 +80,11 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 		return nil, fmt.Errorf("failed to extract placeholders: %w", err)
 	}
 
-	// Extract positions
-	positions, err := proc.ExtractPlaceholdersWithPositions()
-	if err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
-		return nil, fmt.Errorf("failed to extract placeholder positions: %w", err)
-	}
-
 	// Convert placeholders to JSON
 	placeholdersJSON, err := json.Marshal(placeholders)
 	if err != nil {
 		s.gcsClient.DeleteFile(ctx, objectName)
 		return nil, fmt.Errorf("failed to marshal placeholders: %w", err)
-	}
-
-	// Convert positions to JSON
-	positionsJSON, err := json.Marshal(positions)
-	if err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
-		return nil, fmt.Errorf("failed to marshal positions: %w", err)
 	}
 
 	// Save to database
@@ -114,7 +100,6 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 		FileSize:     result.Size,
 		MimeType:     header.Header.Get("Content-Type"),
 		Placeholders: string(placeholdersJSON),
-		Positions:    string(positionsJSON),
 	}
 
 	// Convert aliases to JSON (if provided)
@@ -166,22 +151,6 @@ func (s *TemplateService) GetPlaceholders(templateID string) ([]string, error) {
 	}
 
 	return placeholders, nil
-}
-
-func (s *TemplateService) GetPlaceholderPositions(templateID string) ([]processor.PlaceholderPosition, error) {
-	template, err := s.GetTemplate(templateID)
-	if err != nil {
-		return nil, err
-	}
-
-	var positions []processor.PlaceholderPosition
-	if template.Positions != "" {
-		if err := json.Unmarshal([]byte(template.Positions), &positions); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal positions: %w", err)
-		}
-	}
-
-	return positions, nil
 }
 
 func (s *TemplateService) DeleteTemplate(ctx context.Context, templateID string) error {

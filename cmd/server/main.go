@@ -61,6 +61,7 @@ func main() {
 
 	// Initialize handlers
 	docxHandler := handlers.NewDocxHandler(templateService, documentService)
+	docxHandler.SetGCSBucketName(cfg.GCS.BucketName)
 	logsHandler := handlers.NewLogsHandler(activityLogService)
 
 	// Initialize Gin router
@@ -129,7 +130,6 @@ func main() {
 		v1.POST("/upload", docxHandler.UploadTemplate)
 		v1.GET("/templates", docxHandler.GetAllTemplates)
 		v1.GET("/templates/:templateId/placeholders", docxHandler.GetPlaceholders)
-		v1.GET("/templates/:templateId/positions", docxHandler.GetPlaceholderPositions)
 		v1.GET("/templates/:templateId/preview", docxHandler.GetHTMLPreview)
 		v1.PUT("/templates/:templateId", docxHandler.UpdateTemplate)
 		v1.DELETE("/templates/:templateId", docxHandler.DeleteTemplate)

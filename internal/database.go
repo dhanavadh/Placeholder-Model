@@ -53,7 +53,6 @@ func autoMigrate() error {
             file_size bigint,
             mime_type text,
             placeholders jsonb,
-            positions jsonb,
             created_at timestamp(3) NULL,
             updated_at timestamp(3) NULL,
             deleted_at timestamp(3) NULL
@@ -89,6 +88,14 @@ func autoMigrate() error {
 		}
 	}
 
+	// Drop positions column if it exists
+	if DB.Migrator().HasColumn("document_templates", "positions") {
+		fmt.Println("Dropping positions column from document_templates...")
+		if err := DB.Exec("ALTER TABLE document_templates DROP COLUMN positions").Error; err != nil {
+			fmt.Printf("Warning: failed to drop positions column: %v\n", err)
+		}
+	}
+
 	ensureDocumentTemplateColumns := map[string]string{
 		"filename":      "ALTER TABLE document_templates ADD COLUMN filename text",
 		"original_name": "ALTER TABLE document_templates ADD COLUMN original_name text",
@@ -99,7 +106,6 @@ func autoMigrate() error {
 		"file_size":     "ALTER TABLE document_templates ADD COLUMN file_size bigint",
 		"mime_type":     "ALTER TABLE document_templates ADD COLUMN mime_type text",
 		"placeholders":  "ALTER TABLE document_templates ADD COLUMN placeholders jsonb",
-		"positions":     "ALTER TABLE document_templates ADD COLUMN positions jsonb",
 		"aliases":       "ALTER TABLE document_templates ADD COLUMN aliases jsonb",
 		"gcs_path_html": "ALTER TABLE document_templates ADD COLUMN gcs_path_html text",
 		"created_at":    "ALTER TABLE document_templates ADD COLUMN created_at timestamp(3) NULL",

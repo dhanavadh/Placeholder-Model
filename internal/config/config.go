@@ -155,7 +155,7 @@ func parseAllowOrigins() []string {
 	if len(allowOrigins) == 0 {
 		allowOrigins = []string{
 			"http://localhost:3000",
-			"http://localhost:3001",
+			"http://localhost:3002",
 		}
 	}
 
