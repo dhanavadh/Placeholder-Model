@@ -56,15 +56,15 @@ pipeline {
                         // Upload binary
                         sh "scp -o StrictHostKeyChecking=no ${BINARY_NAME} ${SERVER_USER}@${SERVER_IP}:${REMOTE_DIR}/"
 
-                        // Inject env vars from Jenkins credentials
+                        // Inject env vars from Jenkins credentials (using shared credentials)
                         // Internal service - no external origins needed
                         withCredentials([
                             string(credentialsId: 'placeholder-gcs-bucket-name', variable: 'GCS_BUCKET_NAME'),
-                            string(credentialsId: 'placeholder-google-cloud-project', variable: 'GOOGLE_CLOUD_PROJECT'),
-                            string(credentialsId: 'placeholder-db-host', variable: 'DB_HOST'),
-                            string(credentialsId: 'placeholder-db-port', variable: 'DB_PORT'),
-                            string(credentialsId: 'placeholder-db-user', variable: 'DB_USER'),
-                            string(credentialsId: 'placeholder-db-password', variable: 'DB_PASSWORD'),
+                            string(credentialsId: 'shared-google-cloud-project', variable: 'GOOGLE_CLOUD_PROJECT'),
+                            string(credentialsId: 'shared-db-host', variable: 'DB_HOST'),
+                            string(credentialsId: 'shared-db-port', variable: 'DB_PORT'),
+                            string(credentialsId: 'shared-db-user', variable: 'DB_USER'),
+                            string(credentialsId: 'shared-db-password', variable: 'DB_PASSWORD'),
                             string(credentialsId: 'placeholder-db-name', variable: 'DB_NAME'),
                             string(credentialsId: 'placeholder-gotenberg-url', variable: 'GOTENBERG_URL'),
                             string(credentialsId: 'placeholder-google-api-key', variable: 'GOOGLE_API_KEY')
