@@ -66,6 +66,53 @@ type ProcessResponse struct {
 	Message        string `json:"message"`
 }
 
+type ValidationError struct {
+	Missing []string `json:"missing,omitempty"`
+	Extra   []string `json:"extra,omitempty"`
+}
+
+func (e *ValidationError) HasErrors() bool {
+	return len(e.Missing) > 0 || len(e.Extra) > 0
+}
+
+func (e *ValidationError) Error() string {
+	var parts []string
+	if len(e.Missing) > 0 {
+		parts = append(parts, fmt.Sprintf("missing placeholders: %v", e.Missing))
+	}
+	if len(e.Extra) > 0 {
+		parts = append(parts, fmt.Sprintf("unknown placeholders: %v", e.Extra))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// validateRequestData checks if the request data matches the template placeholders
+func (h *DocxHandler) validateRequestData(templatePlaceholders []string, requestData map[string]string) *ValidationError {
+	validationErr := &ValidationError{}
+
+	// Create a set of template placeholders for fast lookup
+	placeholderSet := make(map[string]bool)
+	for _, p := range templatePlaceholders {
+		placeholderSet[p] = true
+	}
+
+	// Check for missing placeholders (in template but not in request)
+	for _, placeholder := range templatePlaceholders {
+		if _, exists := requestData[placeholder]; !exists {
+			validationErr.Missing = append(validationErr.Missing, placeholder)
+		}
+	}
+
+	// Check for extra keys (in request but not in template)
+	for key := range requestData {
+		if !placeholderSet[key] {
+			validationErr.Extra = append(validationErr.Extra, key)
+		}
+	}
+
+	return validationErr
+}
+
 func (h *DocxHandler) UploadTemplate(c *gin.Context) {
 	file, header, err := c.Request.FormFile("template")
 	if err != nil {
@@ -234,8 +281,21 @@ func (h *DocxHandler) ProcessDocument(c *gin.Context) {
 		return
 	}
 
-	// Debug: Log organization ID
-	fmt.Printf("[DEBUG] ProcessDocument request - OrganizationID: '%s'\n", req.OrganizationID)
+	// Get template placeholders for validation
+	placeholders, err := h.templateService.GetPlaceholders(templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
+		return
+	}
+
+	// Validate request data against template placeholders
+	if validationErr := h.validateRequestData(placeholders, req.Data); validationErr.HasErrors() {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Request data does not match template placeholders",
+			"details": validationErr,
+		})
+		return
+	}
 
 	document, err := h.documentService.ProcessDocument(c.Request.Context(), templateID, req.Data)
 	if err != nil {
