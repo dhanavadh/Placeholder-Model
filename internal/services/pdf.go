@@ -17,15 +17,11 @@ type PDFService struct {
 }
 
 func NewPDFService(gotenbergURL string, timeoutStr string) (*PDFService, error) {
-	// Parse timeout from configuration
 	timeout, err := time.ParseDuration(timeoutStr)
 	if err != nil {
-		// Fallback to optimized default if parsing fails
-		timeout = 30 * time.Second // Reduced for faster processing
-		fmt.Printf("Warning: failed to parse timeout '%s', using optimized default 30s: %v\n", timeoutStr, err)
+		timeout = 30 * time.Second
 	}
 
-	// Create HTTP client with the configured timeout
 	httpClient := &http.Client{
 		Timeout: timeout,
 	}
@@ -53,35 +49,25 @@ func (s *PDFService) convertWithRetry(ctx context.Context, docxReader io.Reader,
 	var lastErr error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Create a new context with extended timeout for each attempt
 		convertCtx, cancel := context.WithTimeout(ctx, s.timeout)
 		defer cancel()
 
-		// Create document from reader
 		doc, err := document.FromReader(filename, docxReader)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create document from reader: %w", err)
 		}
 
-		// Create LibreOffice request for DOCX conversion
 		req := gotenberg.NewLibreOfficeRequest(doc)
-
-		// Set orientation based on parameter
 		if landscape {
 			req.Landscape()
 		}
-		// If landscape is false, default to portrait (don't call Landscape())
 
-		// Convert document
 		resp, err := s.client.Send(convertCtx, req)
 		if err == nil {
 			return resp.Body, nil
 		}
 
 		lastErr = err
-		fmt.Printf("PDF conversion attempt %d/%d failed: %v\n", attempt, maxRetries, err)
-
-		// If this is not the last attempt, wait before retrying
 		if attempt < maxRetries {
 			time.Sleep(time.Duration(attempt) * time.Second)
 		}
@@ -91,18 +77,13 @@ func (s *PDFService) convertWithRetry(ctx context.Context, docxReader io.Reader,
 }
 
 func (s *PDFService) ConvertDocxToPDFFromFile(ctx context.Context, docxFilePath string) (io.ReadCloser, error) {
-	// Create document from file path
 	doc, err := document.FromPath("document.docx", docxFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create document from path: %w", err)
 	}
 
-	// Create LibreOffice request for DOCX conversion
 	req := gotenberg.NewLibreOfficeRequest(doc)
 
-	// Default to portrait orientation
-
-	// Convert document
 	resp, err := s.client.Send(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert document: %w", err)
@@ -116,24 +97,17 @@ func (s *PDFService) ConvertDocxToPDFToFile(ctx context.Context, docxReader io.R
 }
 
 func (s *PDFService) ConvertDocxToPDFToFileWithOrientation(ctx context.Context, docxReader io.Reader, filename string, outputPath string, landscape bool) error {
-	// Create document from reader
 	doc, err := document.FromReader(filename, docxReader)
 	if err != nil {
 		return fmt.Errorf("failed to create document from reader: %w", err)
 	}
 
-	// Create LibreOffice request for DOCX conversion
 	req := gotenberg.NewLibreOfficeRequest(doc)
-
-	// Set orientation based on parameter
 	if landscape {
 		req.Landscape()
 	}
-	// If landscape is false, default to portrait (don't call Landscape())
 
-	// Store the result to file
-	err = s.client.Store(ctx, req, outputPath)
-	if err != nil {
+	if err := s.client.Store(ctx, req, outputPath); err != nil {
 		return fmt.Errorf("failed to store converted document: %w", err)
 	}
 
@@ -145,7 +119,5 @@ func (s *PDFService) GetClient() *gotenberg.Client {
 }
 
 func (s *PDFService) Close() error {
-	// Gotenberg client doesn't need explicit closing
-	// The HTTP client will be cleaned up automatically
 	return nil
 }

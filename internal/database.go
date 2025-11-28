@@ -5,7 +5,7 @@ import (
 
 	"DF-PLCH/internal/config"
 
-	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -15,7 +15,7 @@ func InitDB(cfg *config.Config) error {
 	dsn := cfg.Database.DSN()
 
 	var err error
-	DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{
+	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
@@ -36,7 +36,7 @@ func autoMigrate() error {
 	fmt.Println("Ensuring document_templates table exists...")
 	if DB.Migrator().HasTable("templates") && !DB.Migrator().HasTable("document_templates") {
 		fmt.Println("Renaming legacy templates table to document_templates...")
-		if err := DB.Exec("RENAME TABLE templates TO document_templates").Error; err != nil {
+		if err := DB.Exec("ALTER TABLE templates RENAME TO document_templates").Error; err != nil {
 			return fmt.Errorf("failed to rename templates table: %w", err)
 		}
 	}
@@ -44,29 +44,30 @@ func autoMigrate() error {
 	result := DB.Exec(`
         CREATE TABLE IF NOT EXISTS document_templates (
             id varchar(191) PRIMARY KEY,
-            filename longtext NOT NULL,
-            original_name longtext,
-            display_name longtext,
-            description longtext,
-            author longtext,
-            gcs_path_docx longtext,
+            filename text NOT NULL,
+            original_name text,
+            display_name text,
+            description text,
+            author text,
+            gcs_path_docx text,
             file_size bigint,
-            mime_type longtext,
-            placeholders json,
-            positions json,
-            created_at datetime(3) NULL,
-            updated_at datetime(3) NULL,
-            deleted_at datetime(3) NULL,
-            INDEX idx_document_templates_deleted_at (deleted_at)
+            mime_type text,
+            placeholders jsonb,
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
         )
-    `)
+    `);
 	if result.Error != nil {
 		return fmt.Errorf("failed to create document_templates table: %w", result.Error)
 	}
 
+	// Create index if not exists
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_document_templates_deleted_at ON document_templates(deleted_at)")
+
 	// Handle legacy gcs_path migration for document_templates table
 	var gcsPathExists bool
-	err := DB.Raw("SELECT count(*) FROM INFORMATION_SCHEMA.columns WHERE table_schema = DATABASE() AND table_name = 'document_templates' AND column_name = 'gcs_path'").Scan(&gcsPathExists).Error
+	err := DB.Raw("SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'document_templates' AND column_name = 'gcs_path'").Scan(&gcsPathExists).Error
 	if err == nil && gcsPathExists {
 		fmt.Println("Migrating legacy gcs_path column in document_templates...")
 
@@ -87,22 +88,29 @@ func autoMigrate() error {
 		}
 	}
 
+	// Drop positions column if it exists
+	if DB.Migrator().HasColumn("document_templates", "positions") {
+		fmt.Println("Dropping positions column from document_templates...")
+		if err := DB.Exec("ALTER TABLE document_templates DROP COLUMN positions").Error; err != nil {
+			fmt.Printf("Warning: failed to drop positions column: %v\n", err)
+		}
+	}
+
 	ensureDocumentTemplateColumns := map[string]string{
-		"filename":      "ALTER TABLE document_templates ADD COLUMN filename longtext",
-		"original_name": "ALTER TABLE document_templates ADD COLUMN original_name longtext",
-		"display_name":  "ALTER TABLE document_templates ADD COLUMN display_name longtext",
-		"description":   "ALTER TABLE document_templates ADD COLUMN description longtext",
-		"author":        "ALTER TABLE document_templates ADD COLUMN author longtext",
-		"gcs_path_docx": "ALTER TABLE document_templates ADD COLUMN gcs_path_docx longtext",
+		"filename":      "ALTER TABLE document_templates ADD COLUMN filename text",
+		"original_name": "ALTER TABLE document_templates ADD COLUMN original_name text",
+		"display_name":  "ALTER TABLE document_templates ADD COLUMN display_name text",
+		"description":   "ALTER TABLE document_templates ADD COLUMN description text",
+		"author":        "ALTER TABLE document_templates ADD COLUMN author text",
+		"gcs_path_docx": "ALTER TABLE document_templates ADD COLUMN gcs_path_docx text",
 		"file_size":     "ALTER TABLE document_templates ADD COLUMN file_size bigint",
-		"mime_type":     "ALTER TABLE document_templates ADD COLUMN mime_type longtext",
-		"placeholders":  "ALTER TABLE document_templates ADD COLUMN placeholders json",
-		"positions":     "ALTER TABLE document_templates ADD COLUMN positions json",
-		"aliases":       "ALTER TABLE document_templates ADD COLUMN aliases json",
-		"gcs_path_html": "ALTER TABLE document_templates ADD COLUMN gcs_path_html longtext",
-		"created_at":    "ALTER TABLE document_templates ADD COLUMN created_at datetime(3) NULL",
-		"updated_at":    "ALTER TABLE document_templates ADD COLUMN updated_at datetime(3) NULL",
-		"deleted_at":    "ALTER TABLE document_templates ADD COLUMN deleted_at datetime(3) NULL",
+		"mime_type":     "ALTER TABLE document_templates ADD COLUMN mime_type text",
+		"placeholders":  "ALTER TABLE document_templates ADD COLUMN placeholders jsonb",
+		"aliases":       "ALTER TABLE document_templates ADD COLUMN aliases jsonb",
+		"gcs_path_html": "ALTER TABLE document_templates ADD COLUMN gcs_path_html text",
+		"created_at":    "ALTER TABLE document_templates ADD COLUMN created_at timestamp(3) NULL",
+		"updated_at":    "ALTER TABLE document_templates ADD COLUMN updated_at timestamp(3) NULL",
+		"deleted_at":    "ALTER TABLE document_templates ADD COLUMN deleted_at timestamp(3) NULL",
 	}
 
 	for column, stmt := range ensureDocumentTemplateColumns {
@@ -116,23 +124,25 @@ func autoMigrate() error {
         CREATE TABLE IF NOT EXISTS documents (
             id varchar(191) PRIMARY KEY,
             template_id varchar(191) NOT NULL,
-            filename longtext NOT NULL,
-            gcs_path_docx longtext,
-            gcs_path_pdf longtext,
+            filename text NOT NULL,
+            gcs_path_docx text,
+            gcs_path_pdf text,
             file_size bigint,
-            mime_type longtext,
-            data json,
+            mime_type text,
+            data jsonb,
             status varchar(191) DEFAULT 'completed',
-            created_at datetime(3) NULL,
-            updated_at datetime(3) NULL,
-            deleted_at datetime(3) NULL,
-            INDEX idx_documents_template_id (template_id),
-            INDEX idx_documents_deleted_at (deleted_at)
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
         )
     `)
 	if result.Error != nil {
 		return fmt.Errorf("failed to create documents table: %w", result.Error)
 	}
+
+	// Create indexes if not exists
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_documents_template_id ON documents(template_id)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_documents_deleted_at ON documents(deleted_at)")
 
 	// Handle legacy gcs_path column first
 	if DB.Migrator().HasColumn("documents", "gcs_path") {
@@ -158,16 +168,16 @@ func autoMigrate() error {
 	}
 
 	ensureDocumentsColumns := map[string]string{
-		"filename":      "ALTER TABLE documents ADD COLUMN filename longtext",
-		"gcs_path_docx": "ALTER TABLE documents ADD COLUMN gcs_path_docx longtext",
-		"gcs_path_pdf":  "ALTER TABLE documents ADD COLUMN gcs_path_pdf longtext",
+		"filename":      "ALTER TABLE documents ADD COLUMN filename text",
+		"gcs_path_docx": "ALTER TABLE documents ADD COLUMN gcs_path_docx text",
+		"gcs_path_pdf":  "ALTER TABLE documents ADD COLUMN gcs_path_pdf text",
 		"file_size":     "ALTER TABLE documents ADD COLUMN file_size bigint",
-		"mime_type":     "ALTER TABLE documents ADD COLUMN mime_type longtext",
-		"data":          "ALTER TABLE documents ADD COLUMN data json",
+		"mime_type":     "ALTER TABLE documents ADD COLUMN mime_type text",
+		"data":          "ALTER TABLE documents ADD COLUMN data jsonb",
 		"status":        "ALTER TABLE documents ADD COLUMN status varchar(191) DEFAULT 'completed'",
-		"created_at":    "ALTER TABLE documents ADD COLUMN created_at datetime(3) NULL",
-		"updated_at":    "ALTER TABLE documents ADD COLUMN updated_at datetime(3) NULL",
-		"deleted_at":    "ALTER TABLE documents ADD COLUMN deleted_at datetime(3) NULL",
+		"created_at":    "ALTER TABLE documents ADD COLUMN created_at timestamp(3) NULL",
+		"updated_at":    "ALTER TABLE documents ADD COLUMN updated_at timestamp(3) NULL",
+		"deleted_at":    "ALTER TABLE documents ADD COLUMN deleted_at timestamp(3) NULL",
 	}
 
 	for column, stmt := range ensureDocumentsColumns {
@@ -190,20 +200,22 @@ func autoMigrate() error {
             response_time bigint NOT NULL,
             user_id varchar(36),
             user_email varchar(255),
-            created_at datetime(3) NULL,
-            updated_at datetime(3) NULL,
-            deleted_at datetime(3) NULL,
-            INDEX idx_activity_logs_deleted_at (deleted_at),
-            INDEX idx_activity_logs_method (method),
-            INDEX idx_activity_logs_path (path),
-            INDEX idx_activity_logs_created_at (created_at),
-            INDEX idx_activity_logs_user_id (user_id),
-            INDEX idx_activity_logs_user_email (user_email)
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
         )
     `)
 	if result.Error != nil {
 		return fmt.Errorf("failed to create activity_logs table: %w", result.Error)
 	}
+
+	// Create indexes if not exists
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_activity_logs_deleted_at ON activity_logs(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_activity_logs_method ON activity_logs(method)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_activity_logs_path ON activity_logs(path)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs(created_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_activity_logs_user_id ON activity_logs(user_id)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_activity_logs_user_email ON activity_logs(user_email)")
 
 	// Ensure user columns exist in activity_logs for existing tables
 	ensureActivityLogsColumns := map[string]string{
@@ -217,15 +229,7 @@ func autoMigrate() error {
 		}
 	}
 
-	// Ensure indexes exist
-	if !DB.Migrator().HasIndex("activity_logs", "idx_activity_logs_user_id") {
-		fmt.Println("Adding index idx_activity_logs_user_id...")
-		DB.Exec("CREATE INDEX idx_activity_logs_user_id ON activity_logs(user_id)")
-	}
-	if !DB.Migrator().HasIndex("activity_logs", "idx_activity_logs_user_email") {
-		fmt.Println("Adding index idx_activity_logs_user_email...")
-		DB.Exec("CREATE INDEX idx_activity_logs_user_email ON activity_logs(user_email)")
-	}
+	// Indexes already created above, no need for duplicate code
 
 	fmt.Println("Tables created/verified successfully")
 	return nil

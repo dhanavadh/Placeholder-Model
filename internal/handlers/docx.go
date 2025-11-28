@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"DF-PLCH/internal/models"
-	"DF-PLCH/internal/processor"
 	"DF-PLCH/internal/services"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +20,7 @@ import (
 type DocxHandler struct {
 	templateService *services.TemplateService
 	documentService *services.DocumentService
+	gcsBucketName   string
 }
 
 func NewDocxHandler(templateService *services.TemplateService, documentService *services.DocumentService) *DocxHandler {
@@ -29,12 +30,13 @@ func NewDocxHandler(templateService *services.TemplateService, documentService *
 	}
 }
 
-type PlaceholderResponse struct {
-	Placeholders []string `json:"placeholders"`
+// SetGCSBucketName sets the GCS bucket name for document registration
+func (h *DocxHandler) SetGCSBucketName(bucketName string) {
+	h.gcsBucketName = bucketName
 }
 
-type PlaceholderPositionResponse struct {
-	Placeholders []processor.PlaceholderPosition `json:"placeholders"`
+type PlaceholderResponse struct {
+	Placeholders []string `json:"placeholders"`
 }
 
 type TemplatesResponse struct {
@@ -42,7 +44,8 @@ type TemplatesResponse struct {
 }
 
 type ProcessRequest struct {
-	Data map[string]string `json:"data"`
+	Data           map[string]string `json:"data"`
+	OrganizationID string            `json:"organization_id,omitempty"`
 }
 
 type UploadResponse struct {
@@ -61,6 +64,53 @@ type ProcessResponse struct {
 	DownloadPDFURL string `json:"download_pdf_url,omitempty"`
 	ExpiresAt      string `json:"expires_at"`
 	Message        string `json:"message"`
+}
+
+type ValidationError struct {
+	Missing []string `json:"missing,omitempty"`
+	Extra   []string `json:"extra,omitempty"`
+}
+
+func (e *ValidationError) HasErrors() bool {
+	return len(e.Missing) > 0 || len(e.Extra) > 0
+}
+
+func (e *ValidationError) Error() string {
+	var parts []string
+	if len(e.Missing) > 0 {
+		parts = append(parts, fmt.Sprintf("missing placeholders: %v", e.Missing))
+	}
+	if len(e.Extra) > 0 {
+		parts = append(parts, fmt.Sprintf("unknown placeholders: %v", e.Extra))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// validateRequestData checks if the request data matches the template placeholders
+func (h *DocxHandler) validateRequestData(templatePlaceholders []string, requestData map[string]string) *ValidationError {
+	validationErr := &ValidationError{}
+
+	// Create a set of template placeholders for fast lookup
+	placeholderSet := make(map[string]bool)
+	for _, p := range templatePlaceholders {
+		placeholderSet[p] = true
+	}
+
+	// Check for missing placeholders (in template but not in request)
+	for _, placeholder := range templatePlaceholders {
+		if _, exists := requestData[placeholder]; !exists {
+			validationErr.Missing = append(validationErr.Missing, placeholder)
+		}
+	}
+
+	// Check for extra keys (in request but not in template)
+	for key := range requestData {
+		if !placeholderSet[key] {
+			validationErr.Extra = append(validationErr.Extra, key)
+		}
+	}
+
+	return validationErr
 }
 
 func (h *DocxHandler) UploadTemplate(c *gin.Context) {
@@ -190,26 +240,6 @@ func (h *DocxHandler) GetPlaceholders(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func (h *DocxHandler) GetPlaceholderPositions(c *gin.Context) {
-	templateID := c.Param("templateId")
-	if templateID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
-		return
-	}
-
-	positions, err := h.templateService.GetPlaceholderPositions(templateID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
-		return
-	}
-
-	response := PlaceholderPositionResponse{
-		Placeholders: positions,
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
 func (h *DocxHandler) GetHTMLPreview(c *gin.Context) {
 	templateID := c.Param("templateId")
 	if templateID == "" {
@@ -251,10 +281,41 @@ func (h *DocxHandler) ProcessDocument(c *gin.Context) {
 		return
 	}
 
+	// Get template placeholders for validation
+	placeholders, err := h.templateService.GetPlaceholders(templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
+		return
+	}
+
+	// Validate request data against template placeholders
+	if validationErr := h.validateRequestData(placeholders, req.Data); validationErr.HasErrors() {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Request data does not match template placeholders",
+			"details": validationErr,
+		})
+		return
+	}
+
 	document, err := h.documentService.ProcessDocument(c.Request.Context(), templateID, req.Data)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to process document: %v", err)})
 		return
+	}
+
+	// If organization_id is provided, register the document with organization service
+	if req.OrganizationID != "" {
+		// Get user ID from X-User-ID header (set by API gateway)
+		userID := c.GetHeader("X-User-ID")
+		authToken := c.GetHeader("Authorization")
+		fmt.Printf("[DEBUG] Registration check - OrgID: '%s', UserID: '%s', HasAuthToken: %v\n",
+			req.OrganizationID, userID, authToken != "")
+		if userID != "" && authToken != "" {
+			// Use context.Background() for async call to avoid context cancellation
+			go h.registerDocumentWithOrganization(context.Background(), req.OrganizationID, document, userID, authToken)
+		} else {
+			fmt.Printf("[DEBUG] Registration skipped - userID='%s', authToken!=\"\"=%v\n", userID, authToken != "")
+		}
 	}
 
 	// Create temporary download link that expires in 24 hours
@@ -272,6 +333,66 @@ func (h *DocxHandler) ProcessDocument(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// registerDocumentWithOrganization calls the organization service to register the document
+func (h *DocxHandler) registerDocumentWithOrganization(ctx context.Context, orgID string, document *models.Document, userID string, authToken string) {
+	// This will be called asynchronously to not block the response
+
+	// Prepare request body
+	requestBody := map[string]interface{}{
+		"document_id":  document.ID,
+		"template_id":  document.TemplateID,
+		"file_name":    document.Filename,
+		"file_size":    document.FileSize,
+		"mime_type":    document.MimeType,
+		"gcs_bucket":   h.gcsBucketName,
+		"gcs_path":     document.GCSPathDocx,
+		"gcs_path_pdf": document.GCSPathPdf,
+		"form_data":    map[string]interface{}{}, // Parse from document.Data if needed
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to marshal request body for document registration: %v\n", err)
+		return
+	}
+
+	// Make HTTP request to organization service
+	// Use localhost:8085 for direct service-to-service communication
+	url := fmt.Sprintf("http://localhost:8085/api/v1/organizations/%s/documents/register", orgID)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(jsonData)))
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to create request for document registration: %v\n", err)
+		return
+	}
+
+	// Set headers - forward the user's JWT token for authentication
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authToken)
+
+	fmt.Printf("[INFO] Registering document %s with organization %s for user %v at %s\n",
+		document.ID, orgID, userID, url)
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to call organization service: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("[ERROR] Organization service returned status %d: %s\n", resp.StatusCode, string(body))
+		return
+	}
+
+	fmt.Printf("[SUCCESS] Document %s registered with organization %s\n", document.ID, orgID)
 }
 
 func (h *DocxHandler) DownloadDocument(c *gin.Context) {

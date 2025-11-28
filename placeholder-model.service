@@ -1,0 +1,15 @@
+[Unit]
+Description=Dooform Placeholder Model Service
+After=network.target postgresql.service
+
+[Service]
+User=REPLACE_ME_USER
+Group=REPLACE_ME_USER
+WorkingDirectory=/opt/placeholder-model
+ExecStart=/opt/placeholder-model/placeholder-model
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/placeholder-model/.env
+
+[Install]
+WantedBy=multi-user.target
