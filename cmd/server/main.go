@@ -58,11 +58,38 @@ func main() {
 
 	documentService := services.NewDocumentService(gcsClient, templateService, pdfService)
 	activityLogService := services.NewActivityLogService()
+	fieldRuleService := services.NewFieldRuleService()
+	entityRuleService := services.NewEntityRuleService()
+	dataTypeService := services.NewDataTypeService()
+	inputTypeService := services.NewInputTypeService()
+
+	// Initialize default field rules if none exist
+	if err := fieldRuleService.InitializeDefaultRules(); err != nil {
+		log.Printf("Warning: Failed to initialize default field rules: %v", err)
+	}
+
+	// Initialize default entity rules if none exist
+	if err := entityRuleService.InitializeDefaultRules(); err != nil {
+		log.Printf("Warning: Failed to initialize default entity rules: %v", err)
+	}
+
+	// Initialize default data types if none exist
+	if err := dataTypeService.InitializeDefaultDataTypes(); err != nil {
+		log.Printf("Warning: Failed to initialize default data types: %v", err)
+	}
+
+	// Initialize default input types if none exist
+	if err := inputTypeService.InitializeDefaultInputTypes(); err != nil {
+		log.Printf("Warning: Failed to initialize default input types: %v", err)
+	}
 
 	// Initialize handlers
 	docxHandler := handlers.NewDocxHandler(templateService, documentService)
 	docxHandler.SetGCSBucketName(cfg.GCS.BucketName)
 	logsHandler := handlers.NewLogsHandler(activityLogService)
+	fieldRuleHandler := handlers.NewFieldRuleHandler(fieldRuleService)
+	entityRuleHandler := handlers.NewEntityRuleHandler(entityRuleService)
+	dataTypeHandler := handlers.NewDataTypeHandler(dataTypeService, inputTypeService)
 
 	// Initialize Gin router
 	r := gin.Default()
@@ -134,9 +161,17 @@ func main() {
 		v1.PUT("/templates/:templateId", docxHandler.UpdateTemplate)
 		v1.DELETE("/templates/:templateId", docxHandler.DeleteTemplate)
 
+		// Field definitions (auto-detected from placeholders)
+		v1.GET("/templates/:templateId/field-definitions", docxHandler.GetFieldDefinitions)
+		v1.PUT("/templates/:templateId/field-definitions", docxHandler.UpdateFieldDefinitions)
+		v1.POST("/templates/:templateId/field-definitions/regenerate", docxHandler.RegenerateFieldDefinitions)
+
 		// Document processing and download
 		v1.POST("/templates/:templateId/process", docxHandler.ProcessDocument)
 		v1.GET("/documents/:documentId/download", docxHandler.DownloadDocument)
+
+		// User document history
+		v1.GET("/documents/history", docxHandler.GetUserDocumentHistory)
 
 		// Activity logs
 		v1.GET("/logs", logsHandler.GetAllLogs)
@@ -146,6 +181,43 @@ func main() {
 
 		// Simple history endpoint
 		v1.GET("/history", logsHandler.GetHistory)
+
+		// Field detection rules
+		v1.GET("/field-rules", fieldRuleHandler.GetAllRules)
+		v1.GET("/field-rules/:ruleId", fieldRuleHandler.GetRule)
+		v1.POST("/field-rules", fieldRuleHandler.CreateRule)
+		v1.PUT("/field-rules/:ruleId", fieldRuleHandler.UpdateRule)
+		v1.DELETE("/field-rules/:ruleId", fieldRuleHandler.DeleteRule)
+		v1.POST("/field-rules/test", fieldRuleHandler.TestRule)
+		v1.POST("/field-rules/initialize", fieldRuleHandler.InitializeDefaultRules)
+		v1.GET("/field-rules/data-types", fieldRuleHandler.GetDataTypes)
+		v1.GET("/field-rules/input-types", fieldRuleHandler.GetInputTypes)
+
+		// Entity detection rules
+		v1.GET("/entity-rules", entityRuleHandler.GetAllRules)
+		v1.GET("/entity-rules/:ruleId", entityRuleHandler.GetRule)
+		v1.POST("/entity-rules", entityRuleHandler.CreateRule)
+		v1.PUT("/entity-rules/:ruleId", entityRuleHandler.UpdateRule)
+		v1.DELETE("/entity-rules/:ruleId", entityRuleHandler.DeleteRule)
+		v1.POST("/entity-rules/initialize", entityRuleHandler.InitializeDefaultRules)
+		v1.GET("/entity-rules/labels", entityRuleHandler.GetEntityLabels)
+		v1.GET("/entity-rules/colors", entityRuleHandler.GetEntityColors)
+
+		// Data types management
+		v1.GET("/data-types", dataTypeHandler.GetAllDataTypes)
+		v1.GET("/data-types/:id", dataTypeHandler.GetDataType)
+		v1.POST("/data-types", dataTypeHandler.CreateDataType)
+		v1.PUT("/data-types/:id", dataTypeHandler.UpdateDataType)
+		v1.DELETE("/data-types/:id", dataTypeHandler.DeleteDataType)
+		v1.POST("/data-types/initialize", dataTypeHandler.InitializeDefaultDataTypes)
+
+		// Input types management
+		v1.GET("/input-types", dataTypeHandler.GetAllInputTypes)
+		v1.GET("/input-types/:id", dataTypeHandler.GetInputType)
+		v1.POST("/input-types", dataTypeHandler.CreateInputType)
+		v1.PUT("/input-types/:id", dataTypeHandler.UpdateInputType)
+		v1.DELETE("/input-types/:id", dataTypeHandler.DeleteInputType)
+		v1.POST("/input-types/initialize", dataTypeHandler.InitializeDefaultInputTypes)
 	}
 
 	// Create HTTP server with increased timeouts for document processing

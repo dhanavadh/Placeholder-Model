@@ -8,11 +8,13 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"DF-PLCH/internal/models"
 	"DF-PLCH/internal/services"
+	"DF-PLCH/internal/utils"
 
 	"github.com/gin-gonic/gin"
 )
@@ -297,25 +299,13 @@ func (h *DocxHandler) ProcessDocument(c *gin.Context) {
 		return
 	}
 
-	document, err := h.documentService.ProcessDocument(c.Request.Context(), templateID, req.Data)
+	// Get user ID from X-User-ID header (set by API gateway)
+	userID := c.GetHeader("X-User-ID")
+
+	document, err := h.documentService.ProcessDocument(c.Request.Context(), templateID, req.Data, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to process document: %v", err)})
 		return
-	}
-
-	// If organization_id is provided, register the document with organization service
-	if req.OrganizationID != "" {
-		// Get user ID from X-User-ID header (set by API gateway)
-		userID := c.GetHeader("X-User-ID")
-		authToken := c.GetHeader("Authorization")
-		fmt.Printf("[DEBUG] Registration check - OrgID: '%s', UserID: '%s', HasAuthToken: %v\n",
-			req.OrganizationID, userID, authToken != "")
-		if userID != "" && authToken != "" {
-			// Use context.Background() for async call to avoid context cancellation
-			go h.registerDocumentWithOrganization(context.Background(), req.OrganizationID, document, userID, authToken)
-		} else {
-			fmt.Printf("[DEBUG] Registration skipped - userID='%s', authToken!=\"\"=%v\n", userID, authToken != "")
-		}
 	}
 
 	// Create temporary download link that expires in 24 hours
@@ -450,10 +440,19 @@ func (h *DocxHandler) DeleteTemplate(c *gin.Context) {
 }
 
 type UpdateTemplateRequest struct {
-	DisplayName string            `json:"display_name"`
-	Description string            `json:"description"`
-	Author      string            `json:"author"`
-	Aliases     map[string]string `json:"aliases,omitempty"`
+	DisplayName    string            `json:"display_name"`
+	Name           string            `json:"name"`
+	Description    string            `json:"description"`
+	Author         string            `json:"author"`
+	Category       string            `json:"category"`
+	OriginalSource string            `json:"original_source"`
+	Remarks        string            `json:"remarks"`
+	IsVerified     *bool             `json:"is_verified"`
+	IsAIAvailable  *bool             `json:"is_ai_available"`
+	Type           string            `json:"type"`
+	Tier           string            `json:"tier"`
+	Group          string            `json:"group"`
+	Aliases        map[string]string `json:"aliases,omitempty"`
 }
 
 func (h *DocxHandler) UpdateTemplate(c *gin.Context) {
@@ -487,7 +486,23 @@ func (h *DocxHandler) UpdateTemplate(c *gin.Context) {
 			return
 		}
 
-		template, err := h.templateService.UpdateTemplate(c.Request.Context(), templateID, req.DisplayName, req.Description, req.Author, req.Aliases, nil, nil)
+		updateReq := &services.TemplateUpdateRequest{
+			DisplayName:    req.DisplayName,
+			Name:           req.Name,
+			Description:    req.Description,
+			Author:         req.Author,
+			Category:       req.Category,
+			OriginalSource: req.OriginalSource,
+			Remarks:        req.Remarks,
+			IsVerified:     req.IsVerified,
+			IsAIAvailable:  req.IsAIAvailable,
+			Type:           req.Type,
+			Tier:           req.Tier,
+			Group:          req.Group,
+			Aliases:        req.Aliases,
+		}
+
+		template, err := h.templateService.UpdateTemplate(c.Request.Context(), templateID, updateReq, nil, nil)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update template: %v", err)})
 			return
@@ -500,8 +515,17 @@ func (h *DocxHandler) UpdateTemplate(c *gin.Context) {
 	} else {
 		// Multipart form update (with optional HTML file)
 		displayName := c.PostForm("displayName")
+		name := c.PostForm("name")
 		description := c.PostForm("description")
 		author := c.PostForm("author")
+		category := c.PostForm("category")
+		originalSource := c.PostForm("original_source")
+		remarks := c.PostForm("remarks")
+		isVerifiedStr := c.PostForm("is_verified")
+		isAIAvailableStr := c.PostForm("is_ai_available")
+		templateType := c.PostForm("type")
+		tier := c.PostForm("tier")
+		group := c.PostForm("group")
 		aliasesJSON := c.PostForm("aliases")
 
 		if displayName == "" {
@@ -515,6 +539,17 @@ func (h *DocxHandler) UpdateTemplate(c *gin.Context) {
 		if author == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "author is required"})
 			return
+		}
+
+		// Parse boolean fields
+		var isVerified, isAIAvailable *bool
+		if isVerifiedStr != "" {
+			v := isVerifiedStr == "true"
+			isVerified = &v
+		}
+		if isAIAvailableStr != "" {
+			v := isAIAvailableStr == "true"
+			isAIAvailable = &v
 		}
 
 		// Parse aliases if provided
@@ -541,7 +576,23 @@ func (h *DocxHandler) UpdateTemplate(c *gin.Context) {
 			htmlHeader = nil
 		}
 
-		template, err := h.templateService.UpdateTemplate(c.Request.Context(), templateID, displayName, description, author, aliases, htmlFile, htmlHeader)
+		updateReq := &services.TemplateUpdateRequest{
+			DisplayName:    displayName,
+			Name:           name,
+			Description:    description,
+			Author:         author,
+			Category:       category,
+			OriginalSource: originalSource,
+			Remarks:        remarks,
+			IsVerified:     isVerified,
+			IsAIAvailable:  isAIAvailable,
+			Type:           templateType,
+			Tier:           tier,
+			Group:          group,
+			Aliases:        aliases,
+		}
+
+		template, err := h.templateService.UpdateTemplate(c.Request.Context(), templateID, updateReq, htmlFile, htmlHeader)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update template: %v", err)})
 			return
@@ -569,4 +620,131 @@ func ProcessDocument(c *gin.Context) {
 
 func DownloadDocument(c *gin.Context) {
 	c.JSON(http.StatusInternalServerError, gin.H{"error": "This endpoint is deprecated. Use dependency injection instead."})
+}
+
+// GetUserDocumentHistory returns the document history for the authenticated user
+func (h *DocxHandler) GetUserDocumentHistory(c *gin.Context) {
+	// Get user ID from X-User-ID header (set by API gateway)
+	userID := c.GetHeader("X-User-ID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+
+	// Parse pagination parameters
+	page := 1
+	limit := 20
+	if p := c.Query("page"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
+		}
+	}
+
+	documents, total, err := h.documentService.GetUserDocuments(userID, page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get document history: %v", err)})
+		return
+	}
+
+	// Calculate total pages
+	totalPages := (total + int64(limit) - 1) / int64(limit)
+
+	c.JSON(http.StatusOK, gin.H{
+		"documents": documents,
+		"pagination": gin.H{
+			"page":   page,
+			"limit":  limit,
+			"total":  total,
+			"pages":  totalPages,
+		},
+	})
+}
+
+// GetFieldDefinitions returns the field definitions for a template
+func (h *DocxHandler) GetFieldDefinitions(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	definitions, err := h.templateService.GetFieldDefinitions(templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"field_definitions": definitions,
+	})
+}
+
+// UpdateFieldDefinitionsRequest represents the request body for updating field definitions
+type UpdateFieldDefinitionsRequest struct {
+	FieldDefinitions map[string]utils.FieldDefinition `json:"field_definitions"`
+}
+
+// UpdateFieldDefinitions updates the field definitions for a template
+func (h *DocxHandler) UpdateFieldDefinitions(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	var req UpdateFieldDefinitionsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
+		return
+	}
+
+	if req.FieldDefinitions == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "field_definitions is required"})
+		return
+	}
+
+	template, err := h.templateService.UpdateFieldDefinitions(templateID, req.FieldDefinitions)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to update field definitions: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "Field definitions updated successfully",
+		"template": template,
+	})
+}
+
+// RegenerateFieldDefinitions regenerates field definitions from placeholders
+func (h *DocxHandler) RegenerateFieldDefinitions(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	template, err := h.templateService.RegenerateFieldDefinitions(templateID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to regenerate field definitions: %v", err)})
+		return
+	}
+
+	// Parse the regenerated field definitions for response
+	var definitions map[string]utils.FieldDefinition
+	if template.FieldDefinitions != "" {
+		if err := json.Unmarshal([]byte(template.FieldDefinitions), &definitions); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse field definitions"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":           "Field definitions regenerated successfully",
+		"field_definitions": definitions,
+	})
 }

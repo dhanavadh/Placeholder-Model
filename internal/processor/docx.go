@@ -3,6 +3,7 @@ package processor
 import (
 	"archive/zip"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"path/filepath"
@@ -80,6 +81,11 @@ func (dp *DocxProcessor) extractFile(file *zip.File) error {
 	return err
 }
 
+// escapeXML escapes special XML characters to prevent corrupting the document
+func escapeXML(s string) string {
+	return html.EscapeString(s)
+}
+
 func (dp *DocxProcessor) FindAndReplaceInDocument(placeholders map[string]string) error {
 	documentPath := filepath.Join(dp.tempDir, "word", "document.xml")
 	fmt.Printf("[DEBUG] Reading document.xml for replacement from: %s\n", documentPath)
@@ -96,8 +102,10 @@ func (dp *DocxProcessor) FindAndReplaceInDocument(placeholders map[string]string
 	i := 0
 	for placeholder, value := range placeholders {
 		i++
-		fmt.Printf("[DEBUG] Replacing placeholder %d/%d: %s -> '%s'\n", i, len(placeholders), placeholder, value)
-		contentStr = dp.replaceWithXMLHandling(contentStr, placeholder, value)
+		// Escape XML special characters to prevent document corruption
+		escapedValue := escapeXML(value)
+		fmt.Printf("[DEBUG] Replacing placeholder %d/%d: %s -> '%s' (escaped: '%s')\n", i, len(placeholders), placeholder, value, escapedValue)
+		contentStr = dp.replaceWithXMLHandling(contentStr, placeholder, escapedValue)
 		fmt.Printf("[DEBUG] Replacement %d/%d completed\n", i, len(placeholders))
 	}
 

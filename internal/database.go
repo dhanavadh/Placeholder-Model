@@ -97,20 +97,30 @@ func autoMigrate() error {
 	}
 
 	ensureDocumentTemplateColumns := map[string]string{
-		"filename":      "ALTER TABLE document_templates ADD COLUMN filename text",
-		"original_name": "ALTER TABLE document_templates ADD COLUMN original_name text",
-		"display_name":  "ALTER TABLE document_templates ADD COLUMN display_name text",
-		"description":   "ALTER TABLE document_templates ADD COLUMN description text",
-		"author":        "ALTER TABLE document_templates ADD COLUMN author text",
-		"gcs_path_docx": "ALTER TABLE document_templates ADD COLUMN gcs_path_docx text",
-		"file_size":     "ALTER TABLE document_templates ADD COLUMN file_size bigint",
-		"mime_type":     "ALTER TABLE document_templates ADD COLUMN mime_type text",
-		"placeholders":  "ALTER TABLE document_templates ADD COLUMN placeholders jsonb",
-		"aliases":       "ALTER TABLE document_templates ADD COLUMN aliases jsonb",
-		"gcs_path_html": "ALTER TABLE document_templates ADD COLUMN gcs_path_html text",
-		"created_at":    "ALTER TABLE document_templates ADD COLUMN created_at timestamp(3) NULL",
-		"updated_at":    "ALTER TABLE document_templates ADD COLUMN updated_at timestamp(3) NULL",
-		"deleted_at":    "ALTER TABLE document_templates ADD COLUMN deleted_at timestamp(3) NULL",
+		"filename":          "ALTER TABLE document_templates ADD COLUMN filename text",
+		"original_name":     "ALTER TABLE document_templates ADD COLUMN original_name text",
+		"display_name":      "ALTER TABLE document_templates ADD COLUMN display_name text",
+		"name":              "ALTER TABLE document_templates ADD COLUMN name text",
+		"description":       "ALTER TABLE document_templates ADD COLUMN description text",
+		"author":            "ALTER TABLE document_templates ADD COLUMN author text",
+		"category":          "ALTER TABLE document_templates ADD COLUMN category varchar(50)",
+		"gcs_path_docx":     "ALTER TABLE document_templates ADD COLUMN gcs_path_docx text",
+		"file_size":         "ALTER TABLE document_templates ADD COLUMN file_size bigint",
+		"mime_type":         "ALTER TABLE document_templates ADD COLUMN mime_type text",
+		"placeholders":      "ALTER TABLE document_templates ADD COLUMN placeholders jsonb",
+		"aliases":           "ALTER TABLE document_templates ADD COLUMN aliases jsonb",
+		"field_definitions": "ALTER TABLE document_templates ADD COLUMN field_definitions jsonb",
+		"gcs_path_html":     "ALTER TABLE document_templates ADD COLUMN gcs_path_html text",
+		"original_source":   "ALTER TABLE document_templates ADD COLUMN original_source text",
+		"remarks":           "ALTER TABLE document_templates ADD COLUMN remarks text",
+		"is_verified":       "ALTER TABLE document_templates ADD COLUMN is_verified boolean DEFAULT false",
+		"is_ai_available":   "ALTER TABLE document_templates ADD COLUMN is_ai_available boolean DEFAULT false",
+		"type":              "ALTER TABLE document_templates ADD COLUMN type varchar(20)",
+		"tier":              "ALTER TABLE document_templates ADD COLUMN tier varchar(20)",
+		"group":             "ALTER TABLE document_templates ADD COLUMN \"group\" text",
+		"created_at":        "ALTER TABLE document_templates ADD COLUMN created_at timestamp(3) NULL",
+		"updated_at":        "ALTER TABLE document_templates ADD COLUMN updated_at timestamp(3) NULL",
+		"deleted_at":        "ALTER TABLE document_templates ADD COLUMN deleted_at timestamp(3) NULL",
 	}
 
 	for column, stmt := range ensureDocumentTemplateColumns {
@@ -143,6 +153,7 @@ func autoMigrate() error {
 	// Create indexes if not exists
 	DB.Exec("CREATE INDEX IF NOT EXISTS idx_documents_template_id ON documents(template_id)")
 	DB.Exec("CREATE INDEX IF NOT EXISTS idx_documents_deleted_at ON documents(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)")
 
 	// Handle legacy gcs_path column first
 	if DB.Migrator().HasColumn("documents", "gcs_path") {
@@ -169,6 +180,7 @@ func autoMigrate() error {
 
 	ensureDocumentsColumns := map[string]string{
 		"filename":      "ALTER TABLE documents ADD COLUMN filename text",
+		"user_id":       "ALTER TABLE documents ADD COLUMN user_id varchar(191)",
 		"gcs_path_docx": "ALTER TABLE documents ADD COLUMN gcs_path_docx text",
 		"gcs_path_pdf":  "ALTER TABLE documents ADD COLUMN gcs_path_pdf text",
 		"file_size":     "ALTER TABLE documents ADD COLUMN file_size bigint",
@@ -231,12 +243,150 @@ func autoMigrate() error {
 
 	// Indexes already created above, no need for duplicate code
 
+	// Create field_rules table
+	fmt.Println("Creating field_rules table if not exists...")
+	result = DB.Exec(`
+        CREATE TABLE IF NOT EXISTS field_rules (
+            id varchar(191) PRIMARY KEY,
+            name text NOT NULL,
+            description text,
+            pattern text NOT NULL,
+            priority int DEFAULT 0,
+            is_active boolean DEFAULT true,
+            data_type varchar(50),
+            input_type varchar(50),
+            group_name text,
+            validation jsonb,
+            options jsonb,
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
+        )
+    `)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create field_rules table: %w", result.Error)
+	}
+
+	// Create indexes for field_rules
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_field_rules_deleted_at ON field_rules(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_field_rules_priority ON field_rules(priority DESC)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_field_rules_is_active ON field_rules(is_active)")
+
+	// Add entity column to field_rules if not exists
+	ensureFieldRulesColumns := map[string]string{
+		"entity": "ALTER TABLE field_rules ADD COLUMN entity varchar(50)",
+	}
+
+	for column, stmt := range ensureFieldRulesColumns {
+		if err := ensureColumn("field_rules", column, stmt); err != nil {
+			return err
+		}
+	}
+
+	// Create entity_rules table
+	fmt.Println("Creating entity_rules table if not exists...")
+	result = DB.Exec(`
+        CREATE TABLE IF NOT EXISTS entity_rules (
+            id varchar(191) PRIMARY KEY,
+            name text NOT NULL,
+            code varchar(50) NOT NULL UNIQUE,
+            description text,
+            pattern text NOT NULL,
+            priority int DEFAULT 0,
+            is_active boolean DEFAULT true,
+            color varchar(20),
+            icon varchar(50),
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
+        )
+    `)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create entity_rules table: %w", result.Error)
+	}
+
+	// Create indexes for entity_rules
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_entity_rules_deleted_at ON entity_rules(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_entity_rules_priority ON entity_rules(priority DESC)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_entity_rules_is_active ON entity_rules(is_active)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_entity_rules_code ON entity_rules(code)")
+
+	// Create data_types table for configurable data types
+	fmt.Println("Creating data_types table if not exists...")
+	result = DB.Exec(`
+        CREATE TABLE IF NOT EXISTS data_types (
+            id varchar(191) PRIMARY KEY,
+            code varchar(50) NOT NULL UNIQUE,
+            name text NOT NULL,
+            description text,
+            pattern text,
+            input_type varchar(50) DEFAULT 'text',
+            validation jsonb,
+            options jsonb,
+            priority int DEFAULT 0,
+            is_active boolean DEFAULT true,
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
+        )
+    `)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create data_types table: %w", result.Error)
+	}
+
+	// Add pattern column if it doesn't exist (migration for existing tables)
+	DB.Exec("ALTER TABLE data_types ADD COLUMN IF NOT EXISTS pattern text")
+	// Add default_value column if it doesn't exist (migration for existing tables)
+	DB.Exec("ALTER TABLE data_types ADD COLUMN IF NOT EXISTS default_value text")
+
+	// Create indexes for data_types
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_data_types_deleted_at ON data_types(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_data_types_code ON data_types(code)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_data_types_is_active ON data_types(is_active)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_data_types_priority ON data_types(priority DESC)")
+
+	// Create input_types table for configurable input types
+	fmt.Println("Creating input_types table if not exists...")
+	result = DB.Exec(`
+        CREATE TABLE IF NOT EXISTS input_types (
+            id varchar(191) PRIMARY KEY,
+            code varchar(50) NOT NULL UNIQUE,
+            name text NOT NULL,
+            description text,
+            priority int DEFAULT 0,
+            is_active boolean DEFAULT true,
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
+        )
+    `)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create input_types table: %w", result.Error)
+	}
+
+	// Create indexes for input_types
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_input_types_deleted_at ON input_types(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_input_types_code ON input_types(code)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_input_types_is_active ON input_types(is_active)")
+
 	fmt.Println("Tables created/verified successfully")
 	return nil
 }
 
 func ensureColumn(table, column, statement string) error {
-	if DB.Migrator().HasColumn(table, column) {
+	// Check if column exists (handle quoted column names like "group")
+	cleanColumn := column
+	if column == "group" {
+		// Special check for reserved keyword columns
+		var exists bool
+		err := DB.Raw("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?)", table, column).Scan(&exists).Error
+		if err != nil {
+			return fmt.Errorf("failed to check column %s.%s: %w", table, column, err)
+		}
+		if exists {
+			return nil
+		}
+	} else if DB.Migrator().HasColumn(table, cleanColumn) {
 		return nil
 	}
 

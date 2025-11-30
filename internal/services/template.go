@@ -7,11 +7,14 @@ import (
 	"io"
 	"mime/multipart"
 	"os"
+	"regexp"
+	"strings"
 
 	"DF-PLCH/internal"
 	"DF-PLCH/internal/models"
 	"DF-PLCH/internal/processor"
 	"DF-PLCH/internal/storage"
+	"DF-PLCH/internal/utils"
 
 	"github.com/google/uuid"
 )
@@ -24,6 +27,116 @@ func NewTemplateService(gcsClient *storage.GCSClient) *TemplateService {
 	return &TemplateService{
 		gcsClient: gcsClient,
 	}
+}
+
+// generateFieldDefinitionsFromDatabase generates field definitions using Data Types from database
+// Each DataType has a pattern field for matching placeholder names
+func generateFieldDefinitionsFromDatabase(placeholders []string) map[string]utils.FieldDefinition {
+	definitions := make(map[string]utils.FieldDefinition)
+
+	// Load data types from database (sorted by priority DESC - higher priority first)
+	var dataTypes []models.DataType
+	internal.DB.Where("is_active = ?", true).Order("priority DESC").Find(&dataTypes)
+
+	// Load entity rules from database
+	var entityRules []models.EntityRule
+	internal.DB.Where("is_active = ?", true).Order("priority DESC").Find(&entityRules)
+
+	for _, placeholder := range placeholders {
+		key := strings.ReplaceAll(placeholder, "{{", "")
+		key = strings.ReplaceAll(key, "}}", "")
+
+		definition := applyDataTypeRules(key, placeholder, dataTypes, entityRules)
+		definitions[key] = definition
+	}
+
+	return definitions
+}
+
+// applyDataTypeRules applies data type patterns and entity rules to a placeholder
+func applyDataTypeRules(key, placeholder string, dataTypes []models.DataType, entityRules []models.EntityRule) utils.FieldDefinition {
+	// Default definition
+	definition := utils.FieldDefinition{
+		Placeholder: placeholder,
+		DataType:    utils.DataTypeText,
+		Entity:      utils.EntityGeneral,
+		InputType:   utils.InputTypeText,
+	}
+
+	// Apply entity rules first
+	if len(entityRules) > 0 {
+		definition.Entity = applyEntityRules(key, entityRules)
+	}
+
+	// Try each data type pattern (already sorted by priority DESC)
+	for _, dt := range dataTypes {
+		if !dt.IsActive || dt.Pattern == "" {
+			continue
+		}
+
+		re, err := regexp.Compile(dt.Pattern)
+		if err != nil {
+			continue
+		}
+
+		if !re.MatchString(key) {
+			continue
+		}
+
+		// Pattern matched - apply this data type
+		definition.DataType = utils.DataType(dt.Code)
+
+		// Set input type from data type
+		if dt.InputType != "" {
+			definition.InputType = utils.InputType(dt.InputType)
+		}
+
+		// Parse validation from data type
+		if dt.Validation != "" && dt.Validation != "{}" {
+			var validation utils.FieldValidation
+			if err := json.Unmarshal([]byte(dt.Validation), &validation); err == nil {
+				definition.Validation = &validation
+			}
+		}
+
+		// Get options from data type if input type is select
+		if definition.InputType == utils.InputTypeSelect {
+			if dt.Options != "" && dt.Options != "{}" {
+				var options []string
+				if err := json.Unmarshal([]byte(dt.Options), &options); err == nil && len(options) > 0 {
+					if definition.Validation == nil {
+						definition.Validation = &utils.FieldValidation{}
+					}
+					definition.Validation.Options = options
+				}
+			}
+		}
+
+		// Data type matched, stop processing
+		break
+	}
+
+	return definition
+}
+
+// applyEntityRules applies entity rules to determine the entity type
+func applyEntityRules(key string, entityRules []models.EntityRule) utils.Entity {
+	for _, rule := range entityRules {
+		if !rule.IsActive {
+			continue
+		}
+
+		re, err := regexp.Compile(rule.Pattern)
+		if err != nil {
+			continue
+		}
+
+		if re.MatchString(key) {
+			return utils.Entity(rule.Code)
+		}
+	}
+
+	return utils.EntityGeneral
 }
 
 func (s *TemplateService) UploadTemplate(ctx context.Context, file multipart.File, header *multipart.FileHeader) (*models.Template, error) {
@@ -87,19 +200,28 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 		return nil, fmt.Errorf("failed to marshal placeholders: %w", err)
 	}
 
+	// Auto-detect field definitions from placeholders using database rules
+	fieldDefinitions := generateFieldDefinitionsFromDatabase(placeholders)
+	fieldDefinitionsJSON, err := json.Marshal(fieldDefinitions)
+	if err != nil {
+		s.gcsClient.DeleteFile(ctx, objectName)
+		return nil, fmt.Errorf("failed to marshal field definitions: %w", err)
+	}
+
 	// Save to database
 	template := &models.Template{
-		ID:           templateID,
-		Filename:     header.Filename,
-		OriginalName: header.Filename,
-		DisplayName:  fileName,
-		Description:  description,
-		Author:       author,
-		GCSPath:      objectName,
-		GCSPathHTML:  htmlObjectName,
-		FileSize:     result.Size,
-		MimeType:     header.Header.Get("Content-Type"),
-		Placeholders: string(placeholdersJSON),
+		ID:               templateID,
+		Filename:         header.Filename,
+		OriginalName:     header.Filename,
+		DisplayName:      fileName,
+		Description:      description,
+		Author:           author,
+		GCSPath:          objectName,
+		GCSPathHTML:      htmlObjectName,
+		FileSize:         result.Size,
+		MimeType:         header.Header.Get("Content-Type"),
+		Placeholders:     string(placeholdersJSON),
+		FieldDefinitions: string(fieldDefinitionsJSON),
 	}
 
 	// Convert aliases to JSON (if provided)
@@ -169,20 +291,66 @@ func (s *TemplateService) DeleteTemplate(ctx context.Context, templateID string)
 	return internal.DB.Delete(template).Error
 }
 
-func (s *TemplateService) UpdateTemplate(ctx context.Context, templateID, displayName, description, author string, aliases map[string]string, htmlFile multipart.File, htmlHeader *multipart.FileHeader) (*models.Template, error) {
+// TemplateUpdateRequest contains all fields that can be updated on a template
+type TemplateUpdateRequest struct {
+	DisplayName    string
+	Name           string
+	Description    string
+	Author         string
+	Category       string
+	OriginalSource string
+	Remarks        string
+	IsVerified     *bool
+	IsAIAvailable  *bool
+	Type           string
+	Tier           string
+	Group          string
+	Aliases        map[string]string
+}
+
+func (s *TemplateService) UpdateTemplate(ctx context.Context, templateID string, req *TemplateUpdateRequest, htmlFile multipart.File, htmlHeader *multipart.FileHeader) (*models.Template, error) {
 	template, err := s.GetTemplate(templateID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Update fields
-	template.DisplayName = displayName
-	template.Description = description
-	template.Author = author
+	// Update basic fields
+	template.DisplayName = req.DisplayName
+	template.Description = req.Description
+	template.Author = req.Author
+
+	// Update new fields
+	if req.Name != "" {
+		template.Name = req.Name
+	}
+	if req.Category != "" {
+		template.Category = models.Category(req.Category)
+	}
+	if req.OriginalSource != "" {
+		template.OriginalSource = req.OriginalSource
+	}
+	if req.Remarks != "" {
+		template.Remarks = req.Remarks
+	}
+	if req.IsVerified != nil {
+		template.IsVerified = *req.IsVerified
+	}
+	if req.IsAIAvailable != nil {
+		template.IsAIAvailable = *req.IsAIAvailable
+	}
+	if req.Type != "" {
+		template.Type = models.TemplateType(req.Type)
+	}
+	if req.Tier != "" {
+		template.Tier = models.Tier(req.Tier)
+	}
+	if req.Group != "" {
+		template.Group = req.Group
+	}
 
 	// Convert aliases to JSON (if provided)
-	if aliases != nil {
-		aliasesJSON, err := json.Marshal(aliases)
+	if req.Aliases != nil {
+		aliasesJSON, err := json.Marshal(req.Aliases)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal aliases: %w", err)
 		}
@@ -249,4 +417,74 @@ func (s *TemplateService) GetHTMLPreview(ctx context.Context, gcsPath string) (s
 	}
 
 	return string(content), nil
+}
+
+// UpdateFieldDefinitions updates the field definitions for a template
+func (s *TemplateService) UpdateFieldDefinitions(templateID string, fieldDefinitions map[string]utils.FieldDefinition) (*models.Template, error) {
+	template, err := s.GetTemplate(templateID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert field definitions to JSON
+	fieldDefinitionsJSON, err := json.Marshal(fieldDefinitions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal field definitions: %w", err)
+	}
+
+	template.FieldDefinitions = string(fieldDefinitionsJSON)
+
+	if err := internal.DB.Save(template).Error; err != nil {
+		return nil, fmt.Errorf("failed to update field definitions: %w", err)
+	}
+
+	return template, nil
+}
+
+// GetFieldDefinitions retrieves the field definitions for a template
+func (s *TemplateService) GetFieldDefinitions(templateID string) (map[string]utils.FieldDefinition, error) {
+	template, err := s.GetTemplate(templateID)
+	if err != nil {
+		return nil, err
+	}
+
+	if template.FieldDefinitions == "" {
+		return make(map[string]utils.FieldDefinition), nil
+	}
+
+	var definitions map[string]utils.FieldDefinition
+	if err := json.Unmarshal([]byte(template.FieldDefinitions), &definitions); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal field definitions: %w", err)
+	}
+
+	return definitions, nil
+}
+
+// RegenerateFieldDefinitions regenerates field definitions from placeholders
+func (s *TemplateService) RegenerateFieldDefinitions(templateID string) (*models.Template, error) {
+	template, err := s.GetTemplate(templateID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse placeholders
+	var placeholders []string
+	if err := json.Unmarshal([]byte(template.Placeholders), &placeholders); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal placeholders: %w", err)
+	}
+
+	// Generate field definitions using database rules
+	fieldDefinitions := generateFieldDefinitionsFromDatabase(placeholders)
+	fieldDefinitionsJSON, err := json.Marshal(fieldDefinitions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal field definitions: %w", err)
+	}
+
+	template.FieldDefinitions = string(fieldDefinitionsJSON)
+
+	if err := internal.DB.Save(template).Error; err != nil {
+		return nil, fmt.Errorf("failed to save field definitions: %w", err)
+	}
+
+	return template, nil
 }

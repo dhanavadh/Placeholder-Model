@@ -30,7 +30,7 @@ func NewDocumentService(gcsClient *storage.GCSClient, templateService *TemplateS
 	}
 }
 
-func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string, data map[string]string) (*models.Document, error) {
+func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string, data map[string]string, userID string) (*models.Document, error) {
 	fmt.Printf("[DEBUG] Starting ProcessDocument for template %s\n", templateID)
 
 	// Get template
@@ -195,6 +195,7 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 	document := &models.Document{
 		ID:          documentID,
 		TemplateID:  templateID,
+		UserID:      userID,
 		Filename:    template.Filename,
 		GCSPathDocx: objectName,
 		GCSPathPdf:  pdfGCSPath,
@@ -221,6 +222,31 @@ func (s *DocumentService) GetDocument(documentID string) (*models.Document, erro
 		return nil, fmt.Errorf("document not found: %w", err)
 	}
 	return &document, nil
+}
+
+// GetUserDocuments retrieves all documents created by a user with pagination
+func (s *DocumentService) GetUserDocuments(userID string, page, limit int) ([]models.Document, int64, error) {
+	var documents []models.Document
+	var total int64
+
+	offset := (page - 1) * limit
+
+	// Count total documents for user
+	if err := internal.DB.Model(&models.Document{}).Where("user_id = ?", userID).Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to count documents: %w", err)
+	}
+
+	// Get documents with template info, ordered by newest first
+	if err := internal.DB.Preload("Template").
+		Where("user_id = ?", userID).
+		Order("created_at DESC").
+		Offset(offset).
+		Limit(limit).
+		Find(&documents).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to get documents: %w", err)
+	}
+
+	return documents, total, nil
 }
 
 func (s *DocumentService) GetDocumentReader(ctx context.Context, documentID string, format string) (io.ReadCloser, string, string, error) {
