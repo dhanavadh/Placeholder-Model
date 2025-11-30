@@ -50,6 +50,23 @@ func (s *DataTypeService) GetDataTypeByCode(code string) (*models.DataType, erro
 
 // CreateDataType creates a new data type
 func (s *DataTypeService) CreateDataType(dataType *models.DataType) error {
+	// Check if data type with this code already exists (including soft-deleted)
+	var existing models.DataType
+	err := internal.DB.Unscoped().Where("code = ?", dataType.Code).First(&existing).Error
+
+	if err == nil {
+		// Record exists
+		if existing.DeletedAt.Valid {
+			// It was soft-deleted, hard delete it first
+			if err := internal.DB.Unscoped().Delete(&existing).Error; err != nil {
+				return fmt.Errorf("failed to remove old data type: %w", err)
+			}
+		} else {
+			// Active record with same code exists
+			return fmt.Errorf("data type with code '%s' already exists", dataType.Code)
+		}
+	}
+
 	dataType.ID = uuid.New().String()
 
 	// Ensure Validation and Options are valid JSON
@@ -98,12 +115,23 @@ func (s *DataTypeService) InitializeDefaultDataTypes() error {
 	updated := 0
 
 	for _, dt := range defaults {
-		// Check if data type with this code already exists
+		// Check if data type with this code already exists (including soft-deleted)
 		var existing models.DataType
-		err := internal.DB.Where("code = ?", dt.Code).First(&existing).Error
+		err := internal.DB.Unscoped().Where("code = ?", dt.Code).First(&existing).Error
 
 		if err != nil {
-			// Doesn't exist, create new
+			// Doesn't exist at all, create new
+			dt.ID = uuid.New().String()
+			dt.IsActive = true
+			if err := internal.DB.Create(&dt).Error; err != nil {
+				return fmt.Errorf("failed to create default data type %s: %w", dt.Code, err)
+			}
+			created++
+		} else if existing.DeletedAt.Valid {
+			// Soft-deleted, hard delete first then create new
+			if err := internal.DB.Unscoped().Delete(&existing).Error; err != nil {
+				return fmt.Errorf("failed to remove soft-deleted data type %s: %w", dt.Code, err)
+			}
 			dt.ID = uuid.New().String()
 			dt.IsActive = true
 			if err := internal.DB.Create(&dt).Error; err != nil {
@@ -111,7 +139,7 @@ func (s *DataTypeService) InitializeDefaultDataTypes() error {
 			}
 			created++
 		} else {
-			// Exists, always update with defaults (pattern, options, etc.)
+			// Exists and active, update with defaults (pattern, options, etc.)
 			updates := map[string]interface{}{
 				"pattern":     dt.Pattern,
 				"options":     dt.Options,
@@ -166,6 +194,23 @@ func (s *InputTypeService) GetInputTypeByID(id string) (*models.InputType, error
 
 // CreateInputType creates a new input type
 func (s *InputTypeService) CreateInputType(inputType *models.InputType) error {
+	// Check if input type with this code already exists (including soft-deleted)
+	var existing models.InputType
+	err := internal.DB.Unscoped().Where("code = ?", inputType.Code).First(&existing).Error
+
+	if err == nil {
+		// Record exists
+		if existing.DeletedAt.Valid {
+			// It was soft-deleted, hard delete it first
+			if err := internal.DB.Unscoped().Delete(&existing).Error; err != nil {
+				return fmt.Errorf("failed to remove old input type: %w", err)
+			}
+		} else {
+			// Active record with same code exists
+			return fmt.Errorf("input type with code '%s' already exists", inputType.Code)
+		}
+	}
+
 	inputType.ID = uuid.New().String()
 
 	if err := internal.DB.Create(inputType).Error; err != nil {
@@ -206,12 +251,23 @@ func (s *InputTypeService) InitializeDefaultInputTypes() error {
 	updated := 0
 
 	for _, it := range defaults {
-		// Check if input type with this code already exists
+		// Check if input type with this code already exists (including soft-deleted)
 		var existing models.InputType
-		err := internal.DB.Where("code = ?", it.Code).First(&existing).Error
+		err := internal.DB.Unscoped().Where("code = ?", it.Code).First(&existing).Error
 
 		if err != nil {
-			// Doesn't exist, create new
+			// Doesn't exist at all, create new
+			it.ID = uuid.New().String()
+			it.IsActive = true
+			if err := internal.DB.Create(&it).Error; err != nil {
+				return fmt.Errorf("failed to create default input type %s: %w", it.Code, err)
+			}
+			created++
+		} else if existing.DeletedAt.Valid {
+			// Soft-deleted, hard delete first then create new
+			if err := internal.DB.Unscoped().Delete(&existing).Error; err != nil {
+				return fmt.Errorf("failed to remove soft-deleted input type %s: %w", it.Code, err)
+			}
 			it.ID = uuid.New().String()
 			it.IsActive = true
 			if err := internal.DB.Create(&it).Error; err != nil {
@@ -219,7 +275,7 @@ func (s *InputTypeService) InitializeDefaultInputTypes() error {
 			}
 			created++
 		} else {
-			// Exists, update with defaults
+			// Exists and active, update with defaults
 			updates := map[string]interface{}{
 				"name":        it.Name,
 				"description": it.Description,

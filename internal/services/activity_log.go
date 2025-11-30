@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"DF-PLCH/internal"
 	"DF-PLCH/internal/models"
@@ -14,6 +15,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+// sanitizeUTF8 ensures the string is valid UTF-8, replacing invalid bytes
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	// Replace invalid UTF-8 sequences with replacement character
+	return strings.ToValidUTF8(s, "�")
+}
 
 type ActivityLogService struct{}
 
@@ -76,13 +86,16 @@ func (s *ActivityLogService) LogRequest(c *gin.Context, statusCode int, response
 	}
 
 	// Create activity log entry
+	// Sanitize request body to ensure valid UTF-8 for PostgreSQL
+	sanitizedRequestBody := sanitizeUTF8(requestBody)
+
 	activityLog := &models.ActivityLog{
 		ID:           uuid.New().String(),
 		Method:       c.Request.Method,
 		Path:         c.Request.URL.Path,
 		UserAgent:    userAgent,
 		IPAddress:    clientIP,
-		RequestBody:  requestBody,
+		RequestBody:  sanitizedRequestBody,
 		QueryParams:  string(queryParamsJSON),
 		StatusCode:   statusCode,
 		ResponseTime: responseTime.Milliseconds(),

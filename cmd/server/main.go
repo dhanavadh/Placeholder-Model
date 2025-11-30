@@ -90,6 +90,7 @@ func main() {
 	fieldRuleHandler := handlers.NewFieldRuleHandler(fieldRuleService)
 	entityRuleHandler := handlers.NewEntityRuleHandler(entityRuleService)
 	dataTypeHandler := handlers.NewDataTypeHandler(dataTypeService, inputTypeService)
+	ocrHandler := handlers.NewOCRHandler()
 
 	// Initialize Gin router
 	r := gin.Default()
@@ -218,6 +219,10 @@ func main() {
 		v1.PUT("/input-types/:id", dataTypeHandler.UpdateInputType)
 		v1.DELETE("/input-types/:id", dataTypeHandler.DeleteInputType)
 		v1.POST("/input-types/initialize", dataTypeHandler.InitializeDefaultInputTypes)
+
+		// OCR endpoints
+		v1.POST("/ocr/extract", ocrHandler.ExtractText)
+		v1.POST("/templates/:templateId/ocr", ocrHandler.ExtractForTemplate)
 	}
 
 	// Create HTTP server with increased timeouts for document processing
