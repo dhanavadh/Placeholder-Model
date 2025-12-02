@@ -50,6 +50,9 @@ pipeline {
                         // Create remote directory
                         sh "ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_IP} 'mkdir -p ${REMOTE_DIR}'"
 
+                        // Stop service if running (ignore errors if not running)
+                        sh "ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_IP} 'sudo systemctl stop ${SERVICE_NAME} || true'"
+
                         // Prepare service file
                         sh "sed 's/REPLACE_ME_USER/${SERVER_USER}/g' ${SERVICE_NAME}.service > ${SERVICE_NAME}.service.tmp"
 
