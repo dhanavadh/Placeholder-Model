@@ -32,6 +32,8 @@ func NewTemplateService(storageClient storage.StorageClient) *TemplateService {
 
 // generateFieldDefinitionsFromDatabase generates field definitions using Data Types from database
 // Each DataType has a pattern field for matching placeholder names
+// Placeholders are ordered by their position in the document (first to last)
+// Entity/Group is set to "general" by default - users choose groups themselves
 func generateFieldDefinitionsFromDatabase(placeholders []string) map[string]utils.FieldDefinition {
 	definitions := make(map[string]utils.FieldDefinition)
 
@@ -39,22 +41,85 @@ func generateFieldDefinitionsFromDatabase(placeholders []string) map[string]util
 	var dataTypes []models.DataType
 	internal.DB.Where("is_active = ?", true).Order("priority DESC").Find(&dataTypes)
 
-	// Load entity rules from database
-	var entityRules []models.EntityRule
-	internal.DB.Where("is_active = ?", true).Order("priority DESC").Find(&entityRules)
-
-	for _, placeholder := range placeholders {
+	for i, placeholder := range placeholders {
 		key := strings.ReplaceAll(placeholder, "{{", "")
 		key = strings.ReplaceAll(key, "}}", "")
 
-		definition := applyDataTypeRules(key, placeholder, dataTypes, entityRules)
+		// Apply data type rules without entity auto-detection
+		// Users will choose groups for each placeholder themselves
+		definition := applyDataTypeRulesWithOrder(key, placeholder, dataTypes, i)
 		definitions[key] = definition
 	}
 
 	return definitions
 }
 
+// applyDataTypeRulesWithOrder applies data type patterns to a placeholder with order
+// Entity is set to "general" by default - users choose groups themselves
+func applyDataTypeRulesWithOrder(key, placeholder string, dataTypes []models.DataType, order int) utils.FieldDefinition {
+	// Default definition with order (first to last based on document position)
+	// Entity defaults to "general" - users will choose groups themselves
+	definition := utils.FieldDefinition{
+		Placeholder: placeholder,
+		DataType:    utils.DataTypeText,
+		Entity:      utils.EntityGeneral,
+		InputType:   utils.InputTypeText,
+		Order:       order, // Set order based on position in document
+	}
+
+	// Try each data type pattern (already sorted by priority DESC)
+	for _, dt := range dataTypes {
+		if !dt.IsActive || dt.Pattern == "" {
+			continue
+		}
+
+		re, err := regexp.Compile(dt.Pattern)
+		if err != nil {
+			continue
+		}
+
+		if !re.MatchString(key) {
+			continue
+		}
+
+		// Pattern matched - apply this data type
+		definition.DataType = utils.DataType(dt.Code)
+
+		// Set input type from data type
+		if dt.InputType != "" {
+			definition.InputType = utils.InputType(dt.InputType)
+		}
+
+		// Parse validation from data type
+		if dt.Validation != "" && dt.Validation != "{}" {
+			var validation utils.FieldValidation
+			if err := json.Unmarshal([]byte(dt.Validation), &validation); err == nil {
+				definition.Validation = &validation
+			}
+		}
+
+		// Get options from data type if input type is select
+		if definition.InputType == utils.InputTypeSelect {
+			if dt.Options != "" && dt.Options != "{}" {
+				var options []string
+				if err := json.Unmarshal([]byte(dt.Options), &options); err == nil && len(options) > 0 {
+					if definition.Validation == nil {
+						definition.Validation = &utils.FieldValidation{}
+					}
+					definition.Validation.Options = options
+				}
+			}
+		}
+
+		// Data type matched, stop processing
+		break
+	}
+
+	return definition
+}
+
 // applyDataTypeRules applies data type patterns and entity rules to a placeholder
+// Deprecated: Use applyDataTypeRulesWithOrder instead
 func applyDataTypeRules(key, placeholder string, dataTypes []models.DataType, entityRules []models.EntityRule) utils.FieldDefinition {
 	// Default definition
 	definition := utils.FieldDefinition{
