@@ -76,6 +76,7 @@ type FieldDefinition struct {
 	Description  string           `json:"description,omitempty"`
 	Group        string           `json:"group,omitempty"`        // Group name for related fields (e.g., "dollar_numbers", "4d_codes")
 	GroupOrder   int              `json:"groupOrder,omitempty"`   // Order within the group
+	Order        int              `json:"order"`                  // Global display order for the field (user can reorder)
 	DefaultValue string           `json:"defaultValue,omitempty"` // Default value for the field (e.g., "/" for checkbox)
 	// Merged field properties
 	IsMerged     bool             `json:"isMerged,omitempty"`     // Whether this is a merged field
