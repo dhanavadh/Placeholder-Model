@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -148,26 +150,50 @@ func main() {
 				filePath = filePath[1:]
 			}
 
-			// Check for signed URL parameters
+			// Security: Reject path traversal attempts
+			cleanPath := filepath.Clean(filePath)
+			if strings.Contains(cleanPath, "..") || strings.HasPrefix(cleanPath, "/") || strings.HasPrefix(cleanPath, "\\") {
+				c.JSON(http.StatusForbidden, gin.H{"error": "invalid file path"})
+				return
+			}
+
+			// Security: Always require signed URLs for file access
 			expiresStr := c.Query("expires")
 			signature := c.Query("signature")
 
-			// If signature is provided, verify it
-			if signature != "" {
-				var expiresAt int64
-				if _, err := fmt.Sscanf(expiresStr, "%d", &expiresAt); err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires parameter"})
-					return
-				}
-
-				if !localStorageClient.VerifySignedURL(filePath, expiresAt, signature) {
-					c.JSON(http.StatusForbidden, gin.H{"error": "invalid or expired signature"})
-					return
-				}
+			if signature == "" || expiresStr == "" {
+				c.JSON(http.StatusForbidden, gin.H{"error": "signed URL required"})
+				return
 			}
 
-			// Serve the file
-			fullPath := localStorageClient.GetFilePath(filePath)
+			var expiresAt int64
+			if _, err := fmt.Sscanf(expiresStr, "%d", &expiresAt); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires parameter"})
+				return
+			}
+
+			if !localStorageClient.VerifySignedURL(cleanPath, expiresAt, signature) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "invalid or expired signature"})
+				return
+			}
+
+			// Security: Verify the resolved path is within storage directory
+			fullPath := localStorageClient.GetFilePath(cleanPath)
+			absPath, err := filepath.Abs(fullPath)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve path"})
+				return
+			}
+			basePath, err := filepath.Abs(localStorageClient.GetBasePath())
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve base path"})
+				return
+			}
+			if !strings.HasPrefix(absPath, basePath+string(filepath.Separator)) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+				return
+			}
+
 			c.File(fullPath)
 		})
 		log.Printf("Local file server enabled at /files/*")

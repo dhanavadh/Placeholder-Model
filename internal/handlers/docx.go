@@ -403,12 +403,35 @@ func (h *DocxHandler) DownloadDocument(c *gin.Context) {
 		return
 	}
 
+	// Security: Get user ID from header (set by API gateway after JWT validation)
+	userID := c.GetHeader("X-User-ID")
+
 	format := c.DefaultQuery("format", "docx")
 
-	reader, filename, mimeType, err := h.documentService.GetDocumentReader(c.Request.Context(), documentID, format)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Document not found"})
-		return
+	var reader io.ReadCloser
+	var filename, mimeType string
+	var err error
+
+	// Security: Use authorized reader if user is authenticated
+	if userID != "" {
+		reader, filename, mimeType, err = h.documentService.GetDocumentReaderWithAuth(c.Request.Context(), documentID, userID, format)
+		if err != nil {
+			// Check if it's an authorization error
+			if strings.Contains(err.Error(), "unauthorized") {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+				return
+			}
+			c.JSON(http.StatusNotFound, gin.H{"error": "Document not found"})
+			return
+		}
+	} else {
+		// For backwards compatibility, allow unauthenticated access if no user header
+		// This should be restricted at the API gateway level
+		reader, filename, mimeType, err = h.documentService.GetDocumentReader(c.Request.Context(), documentID, format)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Document not found"})
+			return
+		}
 	}
 	defer reader.Close()
 

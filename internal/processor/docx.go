@@ -62,7 +62,28 @@ func (dp *DocxProcessor) extractFile(file *zip.File) error {
 	}
 	defer rc.Close()
 
-	path := filepath.Join(dp.tempDir, file.Name)
+	// Security: Sanitize file path to prevent ZIP Slip attack
+	cleanName := filepath.Clean(file.Name)
+
+	// Reject paths with parent directory references
+	if strings.HasPrefix(cleanName, "..") || strings.Contains(cleanName, string(os.PathSeparator)+"..") || strings.Contains(cleanName, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("invalid file path in archive (path traversal attempt): %s", file.Name)
+	}
+
+	path := filepath.Join(dp.tempDir, cleanName)
+
+	// Security: Verify the final path is within tempDir
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("failed to resolve path: %w", err)
+	}
+	absTempDir, err := filepath.Abs(dp.tempDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve temp dir: %w", err)
+	}
+	if !strings.HasPrefix(absPath, absTempDir+string(os.PathSeparator)) && absPath != absTempDir {
+		return fmt.Errorf("file path escapes temp directory: %s", file.Name)
+	}
 
 	if file.FileInfo().IsDir() {
 		os.MkdirAll(path, file.FileInfo().Mode())

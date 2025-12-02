@@ -166,6 +166,11 @@ func (l *LocalStorageClient) GetFilePath(objectName string) string {
 	return filepath.Join(l.basePath, objectName)
 }
 
+// GetBasePath returns the base storage directory path
+func (l *LocalStorageClient) GetBasePath() string {
+	return l.basePath
+}
+
 // Close closes the local storage client (no-op for local storage)
 func (l *LocalStorageClient) Close() error {
 	return nil

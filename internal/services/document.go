@@ -224,6 +224,22 @@ func (s *DocumentService) GetDocument(documentID string) (*models.Document, erro
 	return &document, nil
 }
 
+// GetDocumentWithAuth retrieves a document and verifies user ownership
+// Returns error if document not found or user doesn't have access
+func (s *DocumentService) GetDocumentWithAuth(documentID, userID string) (*models.Document, error) {
+	var document models.Document
+	if err := internal.DB.First(&document, "id = ?", documentID).Error; err != nil {
+		return nil, fmt.Errorf("document not found: %w", err)
+	}
+
+	// Security: Verify user owns this document
+	if document.UserID != "" && document.UserID != userID {
+		return nil, fmt.Errorf("unauthorized: you don't have access to this document")
+	}
+
+	return &document, nil
+}
+
 // GetUserDocuments retrieves all documents created by a user with pagination
 func (s *DocumentService) GetUserDocuments(userID string, page, limit int) ([]models.Document, int64, error) {
 	var documents []models.Document
@@ -255,6 +271,22 @@ func (s *DocumentService) GetDocumentReader(ctx context.Context, documentID stri
 		return nil, "", "", err
 	}
 
+	return s.getDocumentReaderFromDocument(ctx, document, format)
+}
+
+// GetDocumentReaderWithAuth retrieves a document reader with authorization check
+// Returns error if user doesn't have access to the document
+func (s *DocumentService) GetDocumentReaderWithAuth(ctx context.Context, documentID, userID, format string) (io.ReadCloser, string, string, error) {
+	document, err := s.GetDocumentWithAuth(documentID, userID)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	return s.getDocumentReaderFromDocument(ctx, document, format)
+}
+
+// getDocumentReaderFromDocument is an internal helper to get reader from a document
+func (s *DocumentService) getDocumentReaderFromDocument(ctx context.Context, document *models.Document, format string) (io.ReadCloser, string, string, error) {
 	var gcsPath, filename, mimeType string
 
 	switch format {
