@@ -5,6 +5,7 @@ pipeline {
         GO111MODULE = 'on'
         SERVICE_NAME = 'placeholder-model'
         BINARY_NAME = 'placeholder-model'
+        REMOTE_DIR = '/opt/placeholder-model'
     }
 
     triggers {
