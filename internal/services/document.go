@@ -303,7 +303,7 @@ func (s *DocumentService) DeleteDocument(ctx context.Context, documentID string)
 	return internal.DB.Delete(document).Error
 }
 
-// DeleteProcessedFile deletes only the specified format file from GCS
+// DeleteProcessedFile deletes only the specified format file from storage
 // but keeps the document record with user data in the database
 func (s *DocumentService) DeleteProcessedFile(ctx context.Context, documentID string, format string) error {
 	document, err := s.GetDocument(documentID)
@@ -312,25 +312,32 @@ func (s *DocumentService) DeleteProcessedFile(ctx context.Context, documentID st
 	}
 
 	var gcsPath string
+	var pathField string
 	switch format {
 	case "pdf":
 		gcsPath = document.GCSPathPdf
+		pathField = "gcs_path_pdf"
 	default:
 		gcsPath = document.GCSPathDocx
+		pathField = "gcs_path_docx"
 	}
 
 	if gcsPath == "" {
 		return fmt.Errorf("file path not found for format %s", format)
 	}
 
-	// Delete only the specified GCS file, keep database record
+	// Delete only the specified file from storage, keep database record
 	if err := s.storageClient.DeleteFile(ctx, gcsPath); err != nil {
-		return fmt.Errorf("failed to delete processed file from GCS: %w", err)
+		return fmt.Errorf("failed to delete processed file from storage: %w", err)
 	}
 
-	// Update document status to indicate file has been downloaded and deleted
-	if err := internal.DB.Model(document).Update("status", "downloaded").Error; err != nil {
-		fmt.Printf("Warning: failed to update document status: %v\n", err)
+	// Clear the path field and update status to indicate file has been downloaded and deleted
+	updates := map[string]interface{}{
+		pathField: "",
+		"status":  "downloaded",
+	}
+	if err := internal.DB.Model(document).Updates(updates).Error; err != nil {
+		fmt.Printf("Warning: failed to update document after file deletion: %v\n", err)
 	}
 
 	return nil
