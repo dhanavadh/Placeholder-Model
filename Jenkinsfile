@@ -57,35 +57,28 @@ pipeline {
                         sh "scp -o StrictHostKeyChecking=no ${BINARY_NAME} ${SERVER_USER}@${SERVER_IP}:${REMOTE_DIR}/"
 
                         // Inject env vars from Jenkins credentials (using shared credentials)
-                        // Internal service - no external origins needed
+                        // Internal service - using local storage (no GCS needed)
                         withCredentials([
-                            string(credentialsId: 'placeholder-gcs-bucket-name', variable: 'GCS_BUCKET_NAME'),
-                            string(credentialsId: 'shared-google-cloud-project', variable: 'GOOGLE_CLOUD_PROJECT'),
                             string(credentialsId: 'shared-db-host', variable: 'DB_HOST'),
                             string(credentialsId: 'shared-db-port', variable: 'DB_PORT'),
                             string(credentialsId: 'shared-db-user', variable: 'DB_USER'),
                             string(credentialsId: 'shared-db-password', variable: 'DB_PASSWORD'),
                             string(credentialsId: 'placeholder-db-name', variable: 'DB_NAME'),
-                            string(credentialsId: 'placeholder-gotenberg-url', variable: 'GOTENBERG_URL'),
-                            string(credentialsId: 'placeholder-google-api-key', variable: 'GOOGLE_API_KEY')
+                            string(credentialsId: 'placeholder-gotenberg-url', variable: 'GOTENBERG_URL')
                         ]) {
                             sh """
                                 ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_IP} 'mkdir -p ${REMOTE_DIR}/storage && cat > ${REMOTE_DIR}/.env << EOF
-SERVER_PORT=8081
+SERVER_PORT=3004
 ENVIRONMENT=production
-BASE_URL=http://localhost:8081
+BASE_URL=http://localhost:3004
 STORAGE_TYPE=local
 STORAGE_LOCAL_PATH=${REMOTE_DIR}/storage
-GCS_BUCKET_NAME=${GCS_BUCKET_NAME}
-GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
-GCS_CREDENTIALS_PATH=/opt/placeholder-model/key.json
 DB_HOST=${DB_HOST}
 DB_PORT=${DB_PORT}
 DB_USER=${DB_USER}
 DB_PASSWORD=${DB_PASSWORD}
 DB_NAME=${DB_NAME}
 GOTENBERG_URL=${GOTENBERG_URL}
-GOOGLE_API_KEY=${GOOGLE_API_KEY}
 EOF'
                             """
                         }
