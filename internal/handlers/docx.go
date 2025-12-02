@@ -22,7 +22,7 @@ import (
 type DocxHandler struct {
 	templateService *services.TemplateService
 	documentService *services.DocumentService
-	gcsBucketName   string
+	storageInfo     string // Storage identifier (bucket name for GCS, path for local)
 }
 
 func NewDocxHandler(templateService *services.TemplateService, documentService *services.DocumentService) *DocxHandler {
@@ -32,9 +32,9 @@ func NewDocxHandler(templateService *services.TemplateService, documentService *
 	}
 }
 
-// SetGCSBucketName sets the GCS bucket name for document registration
-func (h *DocxHandler) SetGCSBucketName(bucketName string) {
-	h.gcsBucketName = bucketName
+// SetStorageInfo sets the storage identifier for logging/metadata purposes
+func (h *DocxHandler) SetStorageInfo(info string) {
+	h.storageInfo = info
 }
 
 type PlaceholderResponse struct {
@@ -308,14 +308,25 @@ func (h *DocxHandler) ProcessDocument(c *gin.Context) {
 		return
 	}
 
-	// Create temporary download link that expires in 24 hours
-	expiresAt := time.Now().Add(24 * time.Hour)
+	// Create temporary download link that expires in 10 minutes
+	expiresAt := time.Now().Add(10 * time.Minute)
 	response := ProcessResponse{
 		DocumentID:  document.ID,
 		DownloadURL: fmt.Sprintf("/api/v1/documents/%s/download", document.ID),
 		ExpiresAt:   expiresAt.Format(time.RFC3339),
-		Message:     "Document processed successfully",
+		Message:     "Document processed successfully. File will be deleted after 10 minutes. You can regenerate from history anytime.",
 	}
+
+	// Schedule file deletion after 10 minutes
+	go func() {
+		time.Sleep(10 * time.Minute)
+		ctx := context.Background()
+		if err := h.documentService.DeleteProcessedFiles(ctx, document.ID); err != nil {
+			fmt.Printf("Warning: failed to auto-delete processed files for document %s: %v\n", document.ID, err)
+		} else {
+			fmt.Printf("Auto-deleted processed files for document %s after 10 minutes\n", document.ID)
+		}
+	}()
 
 	// Add PDF download URL if PDF was generated
 	if document.GCSPathPdf != "" {
@@ -336,9 +347,9 @@ func (h *DocxHandler) registerDocumentWithOrganization(ctx context.Context, orgI
 		"file_name":    document.Filename,
 		"file_size":    document.FileSize,
 		"mime_type":    document.MimeType,
-		"gcs_bucket":   h.gcsBucketName,
-		"gcs_path":     document.GCSPathDocx,
-		"gcs_path_pdf": document.GCSPathPdf,
+		"storage":      h.storageInfo,
+		"storage_path": document.GCSPathDocx,
+		"pdf_path":     document.GCSPathPdf,
 		"form_data":    map[string]interface{}{}, // Parse from document.Data if needed
 	}
 
@@ -605,6 +616,82 @@ func (h *DocxHandler) UpdateTemplate(c *gin.Context) {
 	}
 }
 
+// ReplaceTemplateFiles handles replacing DOCX and/or HTML files for an existing template
+func (h *DocxHandler) ReplaceTemplateFiles(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	// Parse multipart form
+	if err := c.Request.ParseMultipartForm(32 << 20); err != nil { // 32MB max
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse multipart form"})
+		return
+	}
+
+	// Get optional DOCX file
+	var docxFile multipart.File
+	var docxHeader *multipart.FileHeader
+	docxFile, docxHeader, err := c.Request.FormFile("docx")
+	if err == nil {
+		defer docxFile.Close()
+		if filepath.Ext(docxHeader.Filename) != ".docx" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Document file must be .docx"})
+			return
+		}
+	} else {
+		docxFile = nil
+		docxHeader = nil
+	}
+
+	// Get optional HTML file
+	var htmlFile multipart.File
+	var htmlHeader *multipart.FileHeader
+	htmlFile, htmlHeader, err = c.Request.FormFile("html")
+	if err == nil {
+		defer htmlFile.Close()
+		ext := strings.ToLower(filepath.Ext(htmlHeader.Filename))
+		if ext != ".html" && ext != ".htm" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Preview file must be .html or .htm"})
+			return
+		}
+	} else {
+		htmlFile = nil
+		htmlHeader = nil
+	}
+
+	// At least one file must be provided
+	if docxFile == nil && htmlFile == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one file (docx or html) must be provided"})
+		return
+	}
+
+	// Check if field definitions should be regenerated
+	regenerateFields := c.PostForm("regenerate_fields") == "true"
+
+	// Replace files
+	template, err := h.templateService.ReplaceTemplateFiles(c.Request.Context(), templateID, docxFile, docxHeader, htmlFile, htmlHeader, regenerateFields)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to replace files: %v", err)})
+		return
+	}
+
+	// Parse placeholders for response
+	var placeholders []string
+	if template.Placeholders != "" {
+		json.Unmarshal([]byte(template.Placeholders), &placeholders)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "Files replaced successfully",
+		"template_id":  template.ID,
+		"filename":     template.Filename,
+		"placeholders": placeholders,
+		"template":     template,
+	})
+}
+
 // Legacy functions for backward compatibility - these will be removed
 func UploadTemplate(c *gin.Context) {
 	c.JSON(http.StatusInternalServerError, gin.H{"error": "This endpoint is deprecated. Use dependency injection instead."})
@@ -718,6 +805,63 @@ func (h *DocxHandler) UpdateFieldDefinitions(c *gin.Context) {
 		"message":  "Field definitions updated successfully",
 		"template": template,
 	})
+}
+
+// RegenerateDocument regenerates a document from stored data in history
+func (h *DocxHandler) RegenerateDocument(c *gin.Context) {
+	documentID := c.Param("documentId")
+	if documentID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Document ID is required"})
+		return
+	}
+
+	// Get user ID from X-User-ID header (set by API gateway)
+	userID := c.GetHeader("X-User-ID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+
+	document, err := h.documentService.RegenerateDocument(c.Request.Context(), documentID, userID)
+	if err != nil {
+		if strings.Contains(err.Error(), "unauthorized") {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		if strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to regenerate document: %v", err)})
+		return
+	}
+
+	// Create temporary download link that expires in 10 minutes
+	expiresAt := time.Now().Add(10 * time.Minute)
+	response := ProcessResponse{
+		DocumentID:  document.ID,
+		DownloadURL: fmt.Sprintf("/api/v1/documents/%s/download", document.ID),
+		ExpiresAt:   expiresAt.Format(time.RFC3339),
+		Message:     "Document regenerated successfully. File will be deleted after 10 minutes.",
+	}
+
+	// Add PDF download URL if PDF was generated
+	if document.GCSPathPdf != "" {
+		response.DownloadPDFURL = fmt.Sprintf("/api/v1/documents/%s/download?format=pdf", document.ID)
+	}
+
+	// Schedule file deletion after 10 minutes
+	go func() {
+		time.Sleep(10 * time.Minute)
+		ctx := context.Background()
+		if err := h.documentService.DeleteProcessedFiles(ctx, document.ID); err != nil {
+			fmt.Printf("Warning: failed to auto-delete regenerated files for document %s: %v\n", document.ID, err)
+		} else {
+			fmt.Printf("Auto-deleted regenerated files for document %s after 10 minutes\n", document.ID)
+		}
+	}()
+
+	c.JSON(http.StatusOK, response)
 }
 
 // RegenerateFieldDefinitions regenerates field definitions from placeholders

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -12,15 +11,22 @@ import (
 type Config struct {
 	Server    ServerConfig    `json:"server"`
 	Database  DatabaseConfig  `json:"database"`
+	Storage   StorageConfig   `json:"storage"`
 	GCS       GCSConfig       `json:"gcs"`
 	Gotenberg GotenbergConfig `json:"gotenberg"`
 }
 
+type StorageConfig struct {
+	Type      string `json:"type"`       // "gcs" or "local"
+	LocalPath string `json:"local_path"` // Path for local storage (e.g., "./storage")
+	LocalURL  string `json:"local_url"`  // Base URL for local storage (e.g., "http://localhost:8081/files")
+	SecretKey string `json:"secret_key"` // Secret key for signing local URLs
+}
+
 type ServerConfig struct {
-	Port         string   `json:"port"`
-	Environment  string   `json:"environment"`
-	BaseURL      string   `json:"base_url"`
-	AllowOrigins []string `json:"allow_origins"`
+	Port        string `json:"port"`
+	Environment string `json:"environment"`
+	BaseURL     string `json:"base_url"`
 }
 
 type DatabaseConfig struct {
@@ -92,12 +98,14 @@ func Load() (*Config, error) {
 		fmt.Printf("Failed to load .env file from any location, using system environment variables\n")
 	}
 
+	// Get storage type (default to "gcs" for backward compatibility)
+	storageType := getEnv("STORAGE_TYPE", "gcs")
+
 	config := &Config{
 		Server: ServerConfig{
-			Port:         getEnv("SERVER_PORT", "8081"),
-			Environment:  getEnv("ENVIRONMENT", "development"),
-			BaseURL:      getEnv("BASE_URL", ""),
-			AllowOrigins: parseAllowOrigins(),
+			Port:        getEnv("SERVER_PORT", "8081"),
+			Environment: getEnv("ENVIRONMENT", "development"),
+			BaseURL:     getEnv("BASE_URL", ""),
 		},
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
@@ -105,6 +113,12 @@ func Load() (*Config, error) {
 			User:     getEnv("DB_USER", "postgres"),
 			Password: getEnv("DB_PASSWORD", ""),
 			DBName:   getEnv("DB_NAME", "df_plch"),
+		},
+		Storage: StorageConfig{
+			Type:      storageType,
+			LocalPath: getEnv("STORAGE_LOCAL_PATH", "./storage"),
+			LocalURL:  getEnv("STORAGE_LOCAL_URL", "http://localhost:8081/files"),
+			SecretKey: getEnv("STORAGE_SECRET_KEY", ""),
 		},
 		GCS: GCSConfig{
 			BucketName:      getEnv("GCS_BUCKET_NAME", ""),
@@ -125,39 +139,4 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
-}
-
-func parseAllowOrigins() []string {
-	// First try to get from ALLOW_ORIGINS (comma-separated)
-	if origins := os.Getenv("ALLOW_ORIGINS"); origins != "" {
-		// Split by comma and trim whitespace
-		var allowOrigins []string
-		for _, origin := range strings.Split(origins, ",") {
-			if trimmed := strings.TrimSpace(origin); trimmed != "" {
-				allowOrigins = append(allowOrigins, trimmed)
-			}
-		}
-		return allowOrigins
-	}
-
-	// Fallback to individual FRONTEND_URL_* variables for backward compatibility
-	var allowOrigins []string
-
-	if url1 := getEnv("FRONTEND_URL_1", ""); url1 != "" {
-		allowOrigins = append(allowOrigins, url1)
-	}
-
-	if url2 := getEnv("FRONTEND_URL_2", ""); url2 != "" {
-		allowOrigins = append(allowOrigins, url2)
-	}
-
-	// Default origins if none specified
-	if len(allowOrigins) == 0 {
-		allowOrigins = []string{
-			"http://localhost:3000",
-			"http://localhost:3002",
-		}
-	}
-
-	return allowOrigins
 }

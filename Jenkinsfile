@@ -70,10 +70,12 @@ pipeline {
                             string(credentialsId: 'placeholder-google-api-key', variable: 'GOOGLE_API_KEY')
                         ]) {
                             sh """
-                                ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_IP} 'cat > ${REMOTE_DIR}/.env << EOF
+                                ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_IP} 'mkdir -p ${REMOTE_DIR}/storage && cat > ${REMOTE_DIR}/.env << EOF
 SERVER_PORT=8081
 ENVIRONMENT=production
 BASE_URL=http://localhost:8081
+STORAGE_TYPE=local
+STORAGE_LOCAL_PATH=${REMOTE_DIR}/storage
 GCS_BUCKET_NAME=${GCS_BUCKET_NAME}
 GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
 GCS_CREDENTIALS_PATH=/opt/placeholder-model/key.json

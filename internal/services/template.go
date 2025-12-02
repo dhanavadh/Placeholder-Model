@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -20,12 +21,12 @@ import (
 )
 
 type TemplateService struct {
-	gcsClient *storage.GCSClient
+	storageClient storage.StorageClient
 }
 
-func NewTemplateService(gcsClient *storage.GCSClient) *TemplateService {
+func NewTemplateService(storageClient storage.StorageClient) *TemplateService {
 	return &TemplateService{
-		gcsClient: gcsClient,
+		storageClient: storageClient,
 	}
 }
 
@@ -152,7 +153,7 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 	objectName := storage.GenerateObjectName(templateID, header.Filename)
 
 	// Upload DOCX to GCS
-	result, err := s.gcsClient.UploadFile(ctx, file, objectName, header.Header.Get("Content-Type"))
+	result, err := s.storageClient.UploadFile(ctx, file, objectName, header.Header.Get("Content-Type"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload to GCS: %w", err)
 	}
@@ -161,10 +162,10 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 	var htmlObjectName string
 	if htmlFile != nil && htmlHeader != nil {
 		htmlObjectName = storage.GenerateObjectName(templateID, htmlHeader.Filename)
-		_, err := s.gcsClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
+		_, err := s.storageClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
 		if err != nil {
 			// Clean up DOCX file on error
-			s.gcsClient.DeleteFile(ctx, objectName)
+			s.storageClient.DeleteFile(ctx, objectName)
 			return nil, fmt.Errorf("failed to upload HTML preview to GCS: %w", err)
 		}
 	}
@@ -174,7 +175,7 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 	tempFile, err := s.createTempFile(file)
 	if err != nil {
 		// Cleanup GCS file on failure
-		s.gcsClient.DeleteFile(ctx, objectName)
+		s.storageClient.DeleteFile(ctx, objectName)
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer s.cleanupTempFile(tempFile)
@@ -182,21 +183,21 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 	// Process DOCX to extract placeholders
 	proc := processor.NewDocxProcessor(tempFile, "")
 	if err := proc.UnzipDocx(); err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
+		s.storageClient.DeleteFile(ctx, objectName)
 		return nil, fmt.Errorf("failed to process document: %w", err)
 	}
 	defer proc.Cleanup()
 
 	placeholders, err := proc.ExtractPlaceholders()
 	if err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
+		s.storageClient.DeleteFile(ctx, objectName)
 		return nil, fmt.Errorf("failed to extract placeholders: %w", err)
 	}
 
 	// Convert placeholders to JSON
 	placeholdersJSON, err := json.Marshal(placeholders)
 	if err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
+		s.storageClient.DeleteFile(ctx, objectName)
 		return nil, fmt.Errorf("failed to marshal placeholders: %w", err)
 	}
 
@@ -204,7 +205,7 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 	fieldDefinitions := generateFieldDefinitionsFromDatabase(placeholders)
 	fieldDefinitionsJSON, err := json.Marshal(fieldDefinitions)
 	if err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
+		s.storageClient.DeleteFile(ctx, objectName)
 		return nil, fmt.Errorf("failed to marshal field definitions: %w", err)
 	}
 
@@ -228,7 +229,7 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 	if aliases != nil && len(aliases) > 0 {
 		aliasesBytes, err := json.Marshal(aliases)
 		if err != nil {
-			s.gcsClient.DeleteFile(ctx, objectName)
+			s.storageClient.DeleteFile(ctx, objectName)
 			return nil, fmt.Errorf("failed to marshal aliases: %w", err)
 		}
 		template.Aliases = string(aliasesBytes)
@@ -238,7 +239,7 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 	}
 
 	if err := internal.DB.Create(template).Error; err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
+		s.storageClient.DeleteFile(ctx, objectName)
 		return nil, fmt.Errorf("failed to save template metadata: %w", err)
 	}
 
@@ -282,7 +283,7 @@ func (s *TemplateService) DeleteTemplate(ctx context.Context, templateID string)
 	}
 
 	// Delete from GCS
-	if err := s.gcsClient.DeleteFile(ctx, template.GCSPath); err != nil {
+	if err := s.storageClient.DeleteFile(ctx, template.GCSPath); err != nil {
 		// Log error but continue with database deletion
 		fmt.Printf("Warning: failed to delete GCS file %s: %v\n", template.GCSPath, err)
 	}
@@ -360,15 +361,123 @@ func (s *TemplateService) UpdateTemplate(ctx context.Context, templateID string,
 	// Upload HTML preview file if provided
 	if htmlFile != nil && htmlHeader != nil {
 		htmlObjectName := storage.GenerateObjectName(templateID, htmlHeader.Filename)
-		_, err := s.gcsClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
+		_, err := s.storageClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload HTML preview to GCS: %w", err)
 		}
 
 		// Delete old HTML file if exists
 		if template.GCSPathHTML != "" {
-			if err := s.gcsClient.DeleteFile(ctx, template.GCSPathHTML); err != nil {
+			if err := s.storageClient.DeleteFile(ctx, template.GCSPathHTML); err != nil {
 				// Log but don't fail on deletion error
+				fmt.Printf("Warning: failed to delete old HTML file %s: %v\n", template.GCSPathHTML, err)
+			}
+		}
+
+		template.GCSPathHTML = htmlObjectName
+	}
+
+	// Save to database
+	if err := internal.DB.Save(template).Error; err != nil {
+		return nil, fmt.Errorf("failed to update template: %w", err)
+	}
+
+	return template, nil
+}
+
+// ReplaceTemplateFiles replaces the DOCX and/or HTML files for an existing template
+// If regenerateFields is true, field definitions will be regenerated from the new placeholders
+func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID string, docxFile multipart.File, docxHeader *multipart.FileHeader, htmlFile multipart.File, htmlHeader *multipart.FileHeader, regenerateFields bool) (*models.Template, error) {
+	template, err := s.GetTemplate(templateID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle DOCX file replacement
+	if docxFile != nil && docxHeader != nil {
+		// Validate file extension
+		if ext := strings.ToLower(filepath.Ext(docxHeader.Filename)); ext != ".docx" {
+			return nil, fmt.Errorf("invalid file type: expected .docx, got %s", ext)
+		}
+
+		// Upload new DOCX file
+		objectName := storage.GenerateObjectName(templateID, docxHeader.Filename)
+		result, err := s.storageClient.UploadFile(ctx, docxFile, objectName, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload DOCX file: %w", err)
+		}
+
+		// Create temp file for processing
+		docxFile.Seek(0, 0) // Reset file pointer
+		tempFile, err := s.createTempFile(docxFile)
+		if err != nil {
+			s.storageClient.DeleteFile(ctx, objectName)
+			return nil, fmt.Errorf("failed to create temp file: %w", err)
+		}
+		defer s.cleanupTempFile(tempFile)
+
+		// Process DOCX to extract placeholders
+		proc := processor.NewDocxProcessor(tempFile, "")
+		if err := proc.UnzipDocx(); err != nil {
+			s.storageClient.DeleteFile(ctx, objectName)
+			return nil, fmt.Errorf("failed to process document: %w", err)
+		}
+		defer proc.Cleanup()
+
+		placeholders, err := proc.ExtractPlaceholders()
+		if err != nil {
+			s.storageClient.DeleteFile(ctx, objectName)
+			return nil, fmt.Errorf("failed to extract placeholders: %w", err)
+		}
+
+		// Convert placeholders to JSON
+		placeholdersJSON, err := json.Marshal(placeholders)
+		if err != nil {
+			s.storageClient.DeleteFile(ctx, objectName)
+			return nil, fmt.Errorf("failed to marshal placeholders: %w", err)
+		}
+
+		// Delete old DOCX file
+		if template.GCSPath != "" {
+			if err := s.storageClient.DeleteFile(ctx, template.GCSPath); err != nil {
+				fmt.Printf("Warning: failed to delete old DOCX file %s: %v\n", template.GCSPath, err)
+			}
+		}
+
+		// Update template with new DOCX info
+		template.GCSPath = objectName
+		template.Filename = docxHeader.Filename
+		template.FileSize = result.Size
+		template.Placeholders = string(placeholdersJSON)
+
+		// Regenerate field definitions if requested
+		if regenerateFields {
+			fieldDefinitions := generateFieldDefinitionsFromDatabase(placeholders)
+			fieldDefinitionsJSON, err := json.Marshal(fieldDefinitions)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal field definitions: %w", err)
+			}
+			template.FieldDefinitions = string(fieldDefinitionsJSON)
+		}
+	}
+
+	// Handle HTML file replacement
+	if htmlFile != nil && htmlHeader != nil {
+		// Validate file extension
+		if ext := strings.ToLower(filepath.Ext(htmlHeader.Filename)); ext != ".html" && ext != ".htm" {
+			return nil, fmt.Errorf("invalid file type: expected .html, got %s", ext)
+		}
+
+		// Upload new HTML file
+		htmlObjectName := storage.GenerateObjectName(templateID, htmlHeader.Filename)
+		_, err := s.storageClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload HTML file: %w", err)
+		}
+
+		// Delete old HTML file
+		if template.GCSPathHTML != "" {
+			if err := s.storageClient.DeleteFile(ctx, template.GCSPathHTML); err != nil {
 				fmt.Printf("Warning: failed to delete old HTML file %s: %v\n", template.GCSPathHTML, err)
 			}
 		}
@@ -405,7 +514,7 @@ func (s *TemplateService) cleanupTempFile(filePath string) {
 }
 
 func (s *TemplateService) GetHTMLPreview(ctx context.Context, gcsPath string) (string, error) {
-	reader, err := s.gcsClient.ReadFile(ctx, gcsPath)
+	reader, err := s.storageClient.ReadFile(ctx, gcsPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read HTML preview from GCS: %w", err)
 	}

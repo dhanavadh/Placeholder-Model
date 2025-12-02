@@ -17,14 +17,14 @@ import (
 )
 
 type DocumentService struct {
-	gcsClient       *storage.GCSClient
+	storageClient   storage.StorageClient
 	templateService *TemplateService
 	pdfService      *PDFService
 }
 
-func NewDocumentService(gcsClient *storage.GCSClient, templateService *TemplateService, pdfService *PDFService) *DocumentService {
+func NewDocumentService(storageClient storage.StorageClient, templateService *TemplateService, pdfService *PDFService) *DocumentService {
 	return &DocumentService{
-		gcsClient:       gcsClient,
+		storageClient:   storageClient,
 		templateService: templateService,
 		pdfService:      pdfService,
 	}
@@ -43,7 +43,7 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 
 	// Download template from GCS
 	fmt.Printf("[DEBUG] Downloading template from GCS...\n")
-	reader, err := s.gcsClient.ReadFile(ctx, template.GCSPath)
+	reader, err := s.storageClient.ReadFile(ctx, template.GCSPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read template from GCS: %w", err)
 	}
@@ -114,7 +114,7 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 	defer os.Remove(tempOutputFile)
 
 	objectName := storage.GenerateDocumentObjectName(documentID, template.Filename)
-	result, err := s.gcsClient.UploadFile(ctx, outputFile, objectName, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	result, err := s.storageClient.UploadFile(ctx, outputFile, objectName, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload processed document to GCS: %w", err)
 	}
@@ -163,7 +163,7 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 					pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
 					fmt.Printf("[DEBUG] Generated PDF object name: %s\n", pdfObjectName)
 
-					_, err = s.gcsClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
+					_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
 					if err != nil {
 						fmt.Printf("[ERROR] Failed to upload PDF to GCS: %v\n", err)
 						// Don't set pdfObjectName if upload failed
@@ -184,9 +184,9 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 	// Convert data to JSON
 	dataJSON, err := json.Marshal(completeData)
 	if err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
+		s.storageClient.DeleteFile(ctx, objectName)
 		if pdfObjectName != "" {
-			s.gcsClient.DeleteFile(ctx, pdfObjectName)
+			s.storageClient.DeleteFile(ctx, pdfObjectName)
 		}
 		return nil, fmt.Errorf("failed to marshal data: %w", err)
 	}
@@ -206,9 +206,9 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 	}
 
 	if err := internal.DB.Create(document).Error; err != nil {
-		s.gcsClient.DeleteFile(ctx, objectName)
+		s.storageClient.DeleteFile(ctx, objectName)
 		if pdfObjectName != "" {
-			s.gcsClient.DeleteFile(ctx, pdfObjectName)
+			s.storageClient.DeleteFile(ctx, pdfObjectName)
 		}
 		return nil, fmt.Errorf("failed to save document metadata: %w", err)
 	}
@@ -273,7 +273,7 @@ func (s *DocumentService) GetDocumentReader(ctx context.Context, documentID stri
 		mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	}
 
-	reader, err := s.gcsClient.ReadFile(ctx, gcsPath)
+	reader, err := s.storageClient.ReadFile(ctx, gcsPath)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("failed to read document from GCS: %w", err)
 	}
@@ -288,12 +288,12 @@ func (s *DocumentService) DeleteDocument(ctx context.Context, documentID string)
 	}
 
 	// Delete from GCS
-	if err := s.gcsClient.DeleteFile(ctx, document.GCSPathDocx); err != nil {
+	if err := s.storageClient.DeleteFile(ctx, document.GCSPathDocx); err != nil {
 		// Log error but continue with database deletion
 		fmt.Printf("Warning: failed to delete GCS DOCX file %s: %v\n", document.GCSPathDocx, err)
 	}
 	if document.GCSPathPdf != "" {
-		if err := s.gcsClient.DeleteFile(ctx, document.GCSPathPdf); err != nil {
+		if err := s.storageClient.DeleteFile(ctx, document.GCSPathPdf); err != nil {
 			// Log error but continue with database deletion
 			fmt.Printf("Warning: failed to delete GCS PDF file %s: %v\n", document.GCSPathPdf, err)
 		}
@@ -324,7 +324,7 @@ func (s *DocumentService) DeleteProcessedFile(ctx context.Context, documentID st
 	}
 
 	// Delete only the specified GCS file, keep database record
-	if err := s.gcsClient.DeleteFile(ctx, gcsPath); err != nil {
+	if err := s.storageClient.DeleteFile(ctx, gcsPath); err != nil {
 		return fmt.Errorf("failed to delete processed file from GCS: %w", err)
 	}
 
@@ -334,6 +334,167 @@ func (s *DocumentService) DeleteProcessedFile(ctx context.Context, documentID st
 	}
 
 	return nil
+}
+
+// DeleteProcessedFiles deletes both DOCX and PDF files from GCS
+// but keeps the document record with user data in the database for regeneration
+func (s *DocumentService) DeleteProcessedFiles(ctx context.Context, documentID string) error {
+	document, err := s.GetDocument(documentID)
+	if err != nil {
+		return err
+	}
+
+	// Skip if already cleaned up
+	if document.Status == "expired" {
+		return nil
+	}
+
+	// Delete DOCX file from GCS
+	if document.GCSPathDocx != "" {
+		if err := s.storageClient.DeleteFile(ctx, document.GCSPathDocx); err != nil {
+			fmt.Printf("Warning: failed to delete DOCX file %s: %v\n", document.GCSPathDocx, err)
+		}
+	}
+
+	// Delete PDF file from GCS
+	if document.GCSPathPdf != "" {
+		if err := s.storageClient.DeleteFile(ctx, document.GCSPathPdf); err != nil {
+			fmt.Printf("Warning: failed to delete PDF file %s: %v\n", document.GCSPathPdf, err)
+		}
+	}
+
+	// Update document status and clear GCS paths
+	updates := map[string]interface{}{
+		"status":        "expired",
+		"gcs_path_docx": "",
+		"gcs_path_pdf":  "",
+	}
+	if err := internal.DB.Model(document).Updates(updates).Error; err != nil {
+		return fmt.Errorf("failed to update document status: %w", err)
+	}
+
+	return nil
+}
+
+// RegenerateDocument regenerates a document from stored data in the database
+func (s *DocumentService) RegenerateDocument(ctx context.Context, documentID string, userID string) (*models.Document, error) {
+	// Get the original document with stored data
+	document, err := s.GetDocument(documentID)
+	if err != nil {
+		return nil, fmt.Errorf("document not found: %w", err)
+	}
+
+	// Verify user owns this document
+	if document.UserID != userID {
+		return nil, fmt.Errorf("unauthorized: you don't have access to this document")
+	}
+
+	// Parse the stored data
+	var data map[string]string
+	if err := json.Unmarshal([]byte(document.Data), &data); err != nil {
+		return nil, fmt.Errorf("failed to parse stored data: %w", err)
+	}
+
+	// Get template
+	template, err := s.templateService.GetTemplate(document.TemplateID)
+	if err != nil {
+		return nil, fmt.Errorf("template not found: %w", err)
+	}
+
+	// Download template from GCS
+	reader, err := s.storageClient.ReadFile(ctx, template.GCSPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read template from GCS: %w", err)
+	}
+	defer reader.Close()
+
+	// Create temp input file
+	tempInputFile, err := s.createTempFile(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp input file: %w", err)
+	}
+	defer s.cleanupTempFile(tempInputFile)
+
+	// Create temp output file (reuse same document ID)
+	tempOutputFile := filepath.Join(os.TempDir(), documentID+"_regen.docx")
+
+	// Process document
+	proc := processor.NewDocxProcessor(tempInputFile, tempOutputFile)
+	if err := proc.UnzipDocx(); err != nil {
+		return nil, fmt.Errorf("failed to unzip document: %w", err)
+	}
+	defer proc.Cleanup()
+
+	// Replace placeholders with stored data
+	if err := proc.FindAndReplaceInDocument(data); err != nil {
+		return nil, fmt.Errorf("failed to replace placeholders: %w", err)
+	}
+
+	// Re-zip document
+	if err := proc.ReZipDocx(); err != nil {
+		return nil, fmt.Errorf("failed to create output document: %w", err)
+	}
+
+	// Upload processed DOCX document to GCS
+	outputFile, err := os.Open(tempOutputFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open output file: %w", err)
+	}
+	defer outputFile.Close()
+	defer os.Remove(tempOutputFile)
+
+	objectName := storage.GenerateDocumentObjectName(documentID, template.Filename)
+	result, err := s.storageClient.UploadFile(ctx, outputFile, objectName, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload regenerated document to GCS: %w", err)
+	}
+
+	// Generate PDF
+	var pdfObjectName string
+	var pdfGCSPath string
+	if s.pdfService != nil {
+		docxFile, err := os.Open(tempOutputFile)
+		if err == nil {
+			defer docxFile.Close()
+
+			landscape := false
+			if orientation, err := proc.DetectOrientation(); err == nil {
+				landscape = orientation
+			}
+
+			tempPDFPath := filepath.Join(os.TempDir(), documentID+"_regen.pdf")
+			err = s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape)
+			if err == nil {
+				defer os.Remove(tempPDFPath)
+
+				pdfFile, err := os.Open(tempPDFPath)
+				if err == nil {
+					defer pdfFile.Close()
+
+					pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
+					_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
+					if err == nil {
+						pdfGCSPath = pdfObjectName
+					}
+				}
+			}
+		}
+	}
+
+	// Update document record with new GCS paths and status
+	updates := map[string]interface{}{
+		"status":        "completed",
+		"gcs_path_docx": objectName,
+		"gcs_path_pdf":  pdfGCSPath,
+		"file_size":     result.Size,
+	}
+	if err := internal.DB.Model(document).Updates(updates).Error; err != nil {
+		return nil, fmt.Errorf("failed to update document: %w", err)
+	}
+
+	// Refresh document from DB
+	document, _ = s.GetDocument(documentID)
+	return document, nil
 }
 
 func (s *DocumentService) createTempFile(reader io.Reader) (string, error) {

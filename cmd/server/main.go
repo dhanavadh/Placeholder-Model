@@ -36,16 +36,36 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
-	// Initialize GCS client
+	// Initialize storage client based on configuration
 	ctx := context.Background()
-	gcsClient, err := storage.NewGCSClient(ctx, cfg.GCS.BucketName, cfg.GCS.ProjectID, cfg.GCS.CredentialsPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize GCS client: %v", err)
+	var storageClient storage.StorageClient
+	var localStorageClient *storage.LocalStorageClient
+
+	switch cfg.Storage.Type {
+	case "local":
+		log.Printf("Initializing local storage at: %s", cfg.Storage.LocalPath)
+		client, err := storage.NewLocalStorageClient(cfg.Storage.LocalPath, cfg.Storage.LocalURL, cfg.Storage.SecretKey)
+		if err != nil {
+			log.Fatalf("Failed to initialize local storage client: %v", err)
+		}
+		storageClient = client
+		localStorageClient = client
+		log.Printf("Local storage initialized with base URL: %s", cfg.Storage.LocalURL)
+	case "gcs":
+		fallthrough
+	default:
+		log.Printf("Initializing GCS storage with bucket: %s", cfg.GCS.BucketName)
+		client, err := storage.NewGCSClient(ctx, cfg.GCS.BucketName, cfg.GCS.ProjectID, cfg.GCS.CredentialsPath)
+		if err != nil {
+			log.Fatalf("Failed to initialize GCS client: %v", err)
+		}
+		storageClient = client
+		log.Printf("GCS storage initialized")
 	}
-	defer gcsClient.Close()
+	defer storageClient.Close()
 
 	// Initialize services
-	templateService := services.NewTemplateService(gcsClient)
+	templateService := services.NewTemplateService(storageClient)
 
 	// Initialize PDF service with configurable timeout
 	pdfService, err := services.NewPDFService(cfg.Gotenberg.URL, cfg.Gotenberg.Timeout)
@@ -56,7 +76,7 @@ func main() {
 		log.Printf("PDF service initialized with URL: %s, timeout: %s", cfg.Gotenberg.URL, cfg.Gotenberg.Timeout)
 	}
 
-	documentService := services.NewDocumentService(gcsClient, templateService, pdfService)
+	documentService := services.NewDocumentService(storageClient, templateService, pdfService)
 	activityLogService := services.NewActivityLogService()
 	fieldRuleService := services.NewFieldRuleService()
 	entityRuleService := services.NewEntityRuleService()
@@ -85,7 +105,12 @@ func main() {
 
 	// Initialize handlers
 	docxHandler := handlers.NewDocxHandler(templateService, documentService)
-	docxHandler.SetGCSBucketName(cfg.GCS.BucketName)
+	// Set storage info based on storage type
+	if cfg.Storage.Type == "local" {
+		docxHandler.SetStorageInfo(cfg.Storage.LocalPath)
+	} else {
+		docxHandler.SetStorageInfo(cfg.GCS.BucketName)
+	}
 	logsHandler := handlers.NewLogsHandler(activityLogService)
 	fieldRuleHandler := handlers.NewFieldRuleHandler(fieldRuleService)
 	entityRuleHandler := handlers.NewEntityRuleHandler(entityRuleService)
@@ -95,52 +120,8 @@ func main() {
 	// Initialize Gin router
 	r := gin.Default()
 
-	// Activity logging middleware (add before other middlewares)
+	// Activity logging middleware
 	r.Use(activityLogService.LoggingMiddleware())
-
-	// CORS middleware
-	// CORS is handled by the API Gateway, so we disable it here to avoid conflicts
-	// corsConfig := cors.DefaultConfig()
-	//
-	// // Handle wildcard configuration
-	// if slices.Contains(cfg.Server.AllowOrigins, "*") {
-	// 	corsConfig.AllowAllOrigins = true
-	// } else {
-	// 	// Prepare allowed origins with development localhost support
-	// 	allowedOrigins := make([]string, 0, len(cfg.Server.AllowOrigins))
-	//
-	// 	// Add configured origins
-	// 	for _, origin := range cfg.Server.AllowOrigins {
-	// 		if origin != "" {
-	// 			allowedOrigins = append(allowedOrigins, origin)
-	// 		}
-	// 	}
-	//
-	// 	// Add localhost origins in development mode
-	// 	if cfg.Server.Environment == "development" {
-	// 		localhostOrigins := []string{
-	// 			"http://localhost:3001",
-	// 			"http://localhost:3001",
-	// 			"http://localhost:5173",
-	// 			"http://localhost:8080",
-	// 		}
-	//
-	// 		// Only add localhost origins that aren't already in the list
-	// 		for _, localhost := range localhostOrigins {
-	// 			if !slices.Contains(allowedOrigins, localhost) {
-	// 				allowedOrigins = append(allowedOrigins, localhost)
-	// 			}
-	// 		}
-	// 	}
-	//
-	// 	corsConfig.AllowOrigins = allowedOrigins
-	// }
-	//
-	// corsConfig.AllowCredentials = true
-	// corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
-	// corsConfig.AllowHeaders = []string{"Content-Type", "Authorization"}
-	//
-	// r.Use(cors.New(corsConfig))
 
 	// Health check endpoint
 	r.GET("/health", func(c *gin.Context) {
@@ -148,8 +129,51 @@ func main() {
 			"status":    "healthy",
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 			"version":   "2.0.0-cloud",
+			"storage":   cfg.Storage.Type,
 		})
 	})
+
+	// Local file server endpoint (only for local storage with public URL configured)
+	// For internal-only deployments, files are streamed through /documents/:id/download endpoint
+	if localStorageClient != nil && cfg.Storage.LocalURL != "" && cfg.Storage.LocalURL != "internal://storage" {
+		r.GET("/files/*filepath", func(c *gin.Context) {
+			filePath := c.Param("filepath")
+			if filePath == "" || filePath == "/" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "file path required"})
+				return
+			}
+
+			// Remove leading slash
+			if filePath[0] == '/' {
+				filePath = filePath[1:]
+			}
+
+			// Check for signed URL parameters
+			expiresStr := c.Query("expires")
+			signature := c.Query("signature")
+
+			// If signature is provided, verify it
+			if signature != "" {
+				var expiresAt int64
+				if _, err := fmt.Sscanf(expiresStr, "%d", &expiresAt); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires parameter"})
+					return
+				}
+
+				if !localStorageClient.VerifySignedURL(filePath, expiresAt, signature) {
+					c.JSON(http.StatusForbidden, gin.H{"error": "invalid or expired signature"})
+					return
+				}
+			}
+
+			// Serve the file
+			fullPath := localStorageClient.GetFilePath(filePath)
+			c.File(fullPath)
+		})
+		log.Printf("Local file server enabled at /files/*")
+	} else if localStorageClient != nil {
+		log.Printf("Local storage in internal-only mode - files served via /documents/:id/download")
+	}
 
 	// API v1 routes
 	v1 := r.Group("/api/v1")
@@ -161,6 +185,7 @@ func main() {
 		v1.GET("/templates/:templateId/preview", docxHandler.GetHTMLPreview)
 		v1.PUT("/templates/:templateId", docxHandler.UpdateTemplate)
 		v1.DELETE("/templates/:templateId", docxHandler.DeleteTemplate)
+		v1.POST("/templates/:templateId/files", docxHandler.ReplaceTemplateFiles)
 
 		// Field definitions (auto-detected from placeholders)
 		v1.GET("/templates/:templateId/field-definitions", docxHandler.GetFieldDefinitions)
@@ -173,6 +198,9 @@ func main() {
 
 		// User document history
 		v1.GET("/documents/history", docxHandler.GetUserDocumentHistory)
+
+		// Regenerate document from history
+		v1.POST("/documents/:documentId/regenerate", docxHandler.RegenerateDocument)
 
 		// Activity logs
 		v1.GET("/logs", logsHandler.GetAllLogs)

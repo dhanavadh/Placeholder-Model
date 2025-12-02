@@ -10,15 +10,10 @@ import (
 	"google.golang.org/api/option"
 )
 
+// GCSClient implements StorageClient interface for Google Cloud Storage
 type GCSClient struct {
 	client     *storage.Client
 	bucketName string
-}
-
-type UploadResult struct {
-	ObjectName string `json:"object_name"`
-	PublicURL  string `json:"public_url"`
-	Size       int64  `json:"size"`
 }
 
 func NewGCSClient(ctx context.Context, bucketName, projectID, credentialsPath string) (*GCSClient, error) {
@@ -90,18 +85,5 @@ func (g *GCSClient) Close() error {
 	return g.client.Close()
 }
 
-func GenerateObjectName(templateID, filename string) string {
-	timestamp := time.Now().Unix()
-	return fmt.Sprintf("templates/%s/%d_%s", templateID, timestamp, filename)
-}
-
-func GenerateDocumentObjectName(documentID, filename string) string {
-	timestamp := time.Now().Unix()
-	return fmt.Sprintf("documents/%s/%d_%s", documentID, timestamp, filename)
-}
-
-func GenerateDocumentPDFObjectName(documentID, filename string) string {
-	timestamp := time.Now().Unix()
-	pdfFilename := filename[:len(filename)-5] + ".pdf" // Replace .docx with .pdf
-	return fmt.Sprintf("documents/%s/%d_%s", documentID, timestamp, pdfFilename)
-}
+// Ensure GCSClient implements StorageClient interface
+var _ StorageClient = (*GCSClient)(nil)
