@@ -71,7 +71,9 @@ pipeline {
                             string(credentialsId: 'shared-db-user', variable: 'DB_USER'),
                             string(credentialsId: 'shared-db-password', variable: 'DB_PASSWORD'),
                             string(credentialsId: 'placeholder-db-name', variable: 'DB_NAME'),
-                            string(credentialsId: 'placeholder-gotenberg-url', variable: 'GOTENBERG_URL')
+                            string(credentialsId: 'placeholder-gotenberg-url', variable: 'GOTENBERG_URL'),
+                            string(credentialsId: 'placeholder-google-ai-api-key', variable: 'GOOGLE_AI_API_KEY'),
+                            string(credentialsId: 'placeholder-google-vision-api-key', variable: 'GOOGLE_VISION_API_KEY')
                         ]) {
                             sh """
                                 ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_IP} 'mkdir -p ${REMOTE_DIR}/storage && cat > ${REMOTE_DIR}/.env << EOF
@@ -86,6 +88,8 @@ DB_USER=${DB_USER}
 DB_PASSWORD=${DB_PASSWORD}
 DB_NAME=${DB_NAME}
 GOTENBERG_URL=${GOTENBERG_URL}
+GOOGLE_AI_API_KEY=${GOOGLE_AI_API_KEY}
+GOOGLE_VISION_API_KEY=${GOOGLE_VISION_API_KEY}
 EOF'
                             """
                         }
