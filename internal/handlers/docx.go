@@ -20,15 +20,17 @@ import (
 )
 
 type DocxHandler struct {
-	templateService *services.TemplateService
-	documentService *services.DocumentService
-	storageInfo     string // Storage identifier (bucket name for GCS, path for local)
+	templateService   *services.TemplateService
+	documentService   *services.DocumentService
+	statisticsService *services.StatisticsService
+	storageInfo       string // Storage identifier (bucket name for GCS, path for local)
 }
 
-func NewDocxHandler(templateService *services.TemplateService, documentService *services.DocumentService) *DocxHandler {
+func NewDocxHandler(templateService *services.TemplateService, documentService *services.DocumentService, statisticsService *services.StatisticsService) *DocxHandler {
 	return &DocxHandler{
-		templateService: templateService,
-		documentService: documentService,
+		templateService:   templateService,
+		documentService:   documentService,
+		statisticsService: statisticsService,
 	}
 }
 
@@ -209,6 +211,61 @@ func (h *DocxHandler) UploadTemplate(c *gin.Context) {
 }
 
 func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
+	// Check if filtering is requested
+	documentTypeID := c.Query("document_type_id")
+	templateType := c.Query("type")
+	tier := c.Query("tier")
+	category := c.Query("category")
+	search := c.Query("search")
+	isVerifiedStr := c.Query("is_verified")
+	includeDocumentType := c.Query("include_document_type") == "true"
+	grouped := c.Query("grouped") == "true"
+
+	// If grouped view is requested, return templates grouped by document type
+	if grouped {
+		documentTypes, orphanTemplates, err := h.templateService.GetTemplatesGroupedByDocumentType()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get templates: %v", err)})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"document_types":    documentTypes,
+			"orphan_templates": orphanTemplates,
+		})
+		return
+	}
+
+	// If any filter is specified, use filtered query
+	if documentTypeID != "" || templateType != "" || tier != "" || category != "" || search != "" || isVerifiedStr != "" || includeDocumentType {
+		filter := &services.TemplateFilter{
+			DocumentTypeID:      documentTypeID,
+			Type:                templateType,
+			Tier:                tier,
+			Category:            category,
+			Search:              search,
+			IncludeDocumentType: includeDocumentType,
+		}
+
+		// Parse is_verified boolean
+		if isVerifiedStr != "" {
+			isVerified := isVerifiedStr == "true"
+			filter.IsVerified = &isVerified
+		}
+
+		templates, err := h.templateService.GetTemplatesWithFilter(filter)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get templates: %v", err)})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"templates": templates,
+		})
+		return
+	}
+
+	// Default: return all templates
 	templates, err := h.templateService.GetAllTemplates()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get templates: %v", err)})
@@ -306,6 +363,15 @@ func (h *DocxHandler) ProcessDocument(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to process document: %v", err)})
 		return
+	}
+
+	// Record form submission statistics
+	if h.statisticsService != nil {
+		go func() {
+			if err := h.statisticsService.RecordFormSubmit(templateID); err != nil {
+				fmt.Printf("Warning: failed to record form submit statistics: %v\n", err)
+			}
+		}()
 	}
 
 	// Create temporary download link that expires in 10 minutes
@@ -411,6 +477,7 @@ func (h *DocxHandler) DownloadDocument(c *gin.Context) {
 	var reader io.ReadCloser
 	var filename, mimeType string
 	var err error
+	var templateID string
 
 	// Security: Use authorized reader if user is authenticated
 	if userID != "" {
@@ -424,6 +491,10 @@ func (h *DocxHandler) DownloadDocument(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Document not found"})
 			return
 		}
+		// Get template ID for statistics
+		if doc, docErr := h.documentService.GetDocumentWithAuth(documentID, userID); docErr == nil {
+			templateID = doc.TemplateID
+		}
 	} else {
 		// For backwards compatibility, allow unauthenticated access if no user header
 		// This should be restricted at the API gateway level
@@ -431,6 +502,10 @@ func (h *DocxHandler) DownloadDocument(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Document not found"})
 			return
+		}
+		// Get template ID for statistics
+		if doc, docErr := h.documentService.GetDocument(documentID); docErr == nil {
+			templateID = doc.TemplateID
 		}
 	}
 	defer reader.Close()
@@ -446,6 +521,16 @@ func (h *DocxHandler) DownloadDocument(c *gin.Context) {
 		// If streaming fails, don't delete the file
 		fmt.Printf("Error streaming file: %v\n", err)
 		return
+	}
+
+	// Record download/export statistics
+	if h.statisticsService != nil {
+		go func() {
+			// Record as export (document download is effectively an export)
+			if err := h.statisticsService.RecordExport(templateID); err != nil {
+				fmt.Printf("Warning: failed to record export statistics: %v\n", err)
+			}
+		}()
 	}
 
 	// After successful download, delete the processed DOCX file from GCS

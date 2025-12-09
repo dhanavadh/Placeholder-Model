@@ -18,6 +18,7 @@ import (
 	"DF-PLCH/internal/utils"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type TemplateService struct {
@@ -325,6 +326,77 @@ func (s *TemplateService) GetAllTemplates() ([]models.Template, error) {
 		return nil, fmt.Errorf("failed to get templates: %w", err)
 	}
 	return templates, nil
+}
+
+// TemplateFilter represents filter options for querying templates
+type TemplateFilter struct {
+	DocumentTypeID string // Filter by document type ID
+	Type           string // Filter by template type (official, private, community)
+	Tier           string // Filter by tier (free, basic, premium, enterprise)
+	Category       string // Filter by category
+	IsVerified     *bool  // Filter by verification status
+	Search         string // Search in name, description, author
+	IncludeDocumentType bool // Whether to preload document type
+}
+
+// GetTemplatesWithFilter retrieves templates with filtering options
+func (s *TemplateService) GetTemplatesWithFilter(filter *TemplateFilter) ([]models.Template, error) {
+	var templates []models.Template
+	query := internal.DB.Model(&models.Template{})
+
+	// Apply filters
+	if filter.DocumentTypeID != "" {
+		query = query.Where("document_type_id = ?", filter.DocumentTypeID)
+	}
+	if filter.Type != "" {
+		query = query.Where("type = ?", filter.Type)
+	}
+	if filter.Tier != "" {
+		query = query.Where("tier = ?", filter.Tier)
+	}
+	if filter.Category != "" {
+		query = query.Where("category = ?", filter.Category)
+	}
+	if filter.IsVerified != nil {
+		query = query.Where("is_verified = ?", *filter.IsVerified)
+	}
+	if filter.Search != "" {
+		searchPattern := "%" + filter.Search + "%"
+		query = query.Where("display_name ILIKE ? OR description ILIKE ? OR author ILIKE ?", searchPattern, searchPattern, searchPattern)
+	}
+
+	// Preload document type if requested
+	if filter.IncludeDocumentType {
+		query = query.Preload("DocumentType")
+	}
+
+	// Order by variant_order within document type, then by created_at
+	query = query.Order("document_type_id ASC, variant_order ASC, created_at DESC")
+
+	if err := query.Find(&templates).Error; err != nil {
+		return nil, fmt.Errorf("failed to get templates: %w", err)
+	}
+
+	return templates, nil
+}
+
+// GetTemplatesGroupedByDocumentType retrieves all templates grouped by their document type
+func (s *TemplateService) GetTemplatesGroupedByDocumentType() ([]models.DocumentType, []models.Template, error) {
+	// Get all document types with their templates
+	var documentTypes []models.DocumentType
+	if err := internal.DB.Preload("Templates", func(db *gorm.DB) *gorm.DB {
+		return db.Order("variant_order ASC")
+	}).Order("sort_order ASC, name ASC").Find(&documentTypes).Error; err != nil {
+		return nil, nil, fmt.Errorf("failed to get document types: %w", err)
+	}
+
+	// Get orphan templates (templates without a document type)
+	var orphanTemplates []models.Template
+	if err := internal.DB.Where("document_type_id IS NULL OR document_type_id = ''").Order("created_at DESC").Find(&orphanTemplates).Error; err != nil {
+		return nil, nil, fmt.Errorf("failed to get orphan templates: %w", err)
+	}
+
+	return documentTypes, orphanTemplates, nil
 }
 
 func (s *TemplateService) GetPlaceholders(templateID string) ([]string, error) {

@@ -369,6 +369,138 @@ func autoMigrate() error {
 	DB.Exec("CREATE INDEX IF NOT EXISTS idx_input_types_code ON input_types(code)")
 	DB.Exec("CREATE INDEX IF NOT EXISTS idx_input_types_is_active ON input_types(is_active)")
 
+	// Create statistics table for tracking form submissions, exports, etc.
+	fmt.Println("Creating statistics table if not exists...")
+	result = DB.Exec(`
+        CREATE TABLE IF NOT EXISTS statistics (
+            id varchar(36) PRIMARY KEY,
+            event_type varchar(50) NOT NULL,
+            template_id varchar(191),
+            date date NOT NULL,
+            count bigint NOT NULL DEFAULT 0,
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
+        )
+    `)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create statistics table: %w", result.Error)
+	}
+
+	// Create indexes for statistics
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_statistics_deleted_at ON statistics(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_statistics_event_type ON statistics(event_type)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_statistics_template_id ON statistics(template_id)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_statistics_date ON statistics(date)")
+	// Composite index for efficient lookups
+	DB.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_statistics_unique ON statistics(event_type, template_id, date) WHERE deleted_at IS NULL")
+
+	// Create document_types table for grouping related templates
+	fmt.Println("Creating document_types table if not exists...")
+	result = DB.Exec(`
+        CREATE TABLE IF NOT EXISTS document_types (
+            id varchar(191) PRIMARY KEY,
+            code varchar(50) NOT NULL UNIQUE,
+            name text NOT NULL,
+            name_en text,
+            description text,
+            category varchar(50),
+            icon text,
+            color varchar(20),
+            sort_order int DEFAULT 0,
+            is_active boolean DEFAULT true,
+            metadata jsonb,
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
+        )
+    `)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create document_types table: %w", result.Error)
+	}
+
+	// Create indexes for document_types
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_document_types_deleted_at ON document_types(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_document_types_code ON document_types(code)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_document_types_category ON document_types(category)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_document_types_is_active ON document_types(is_active)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_document_types_sort_order ON document_types(sort_order)")
+
+	// Add document_type_id and variant columns to document_templates if not exists
+	ensureDocumentTemplateNewColumns := map[string]string{
+		"document_type_id": "ALTER TABLE document_templates ADD COLUMN document_type_id varchar(191)",
+		"variant_name":     "ALTER TABLE document_templates ADD COLUMN variant_name text",
+		"variant_order":    "ALTER TABLE document_templates ADD COLUMN variant_order int DEFAULT 0",
+	}
+
+	for column, stmt := range ensureDocumentTemplateNewColumns {
+		if err := ensureColumn("document_templates", column, stmt); err != nil {
+			return err
+		}
+	}
+
+	// Create index for document_type_id in document_templates
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_document_templates_document_type_id ON document_templates(document_type_id)")
+
+	// Create filter_categories table for configurable filter groups
+	fmt.Println("Creating filter_categories table if not exists...")
+	result = DB.Exec(`
+        CREATE TABLE IF NOT EXISTS filter_categories (
+            id varchar(191) PRIMARY KEY,
+            code varchar(50) NOT NULL UNIQUE,
+            name text NOT NULL,
+            name_en text,
+            description text,
+            field_name varchar(50) NOT NULL,
+            sort_order int DEFAULT 0,
+            is_active boolean DEFAULT true,
+            is_system boolean DEFAULT false,
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
+        )
+    `)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create filter_categories table: %w", result.Error)
+	}
+
+	// Create indexes for filter_categories
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_categories_deleted_at ON filter_categories(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_categories_code ON filter_categories(code)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_categories_is_active ON filter_categories(is_active)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_categories_sort_order ON filter_categories(sort_order)")
+
+	// Create filter_options table for options within filter categories
+	fmt.Println("Creating filter_options table if not exists...")
+	result = DB.Exec(`
+        CREATE TABLE IF NOT EXISTS filter_options (
+            id varchar(191) PRIMARY KEY,
+            filter_category_id varchar(191) NOT NULL,
+            value varchar(100) NOT NULL,
+            label text NOT NULL,
+            label_en text,
+            description text,
+            color varchar(20),
+            icon varchar(50),
+            sort_order int DEFAULT 0,
+            is_active boolean DEFAULT true,
+            is_default boolean DEFAULT false,
+            created_at timestamp(3) NULL,
+            updated_at timestamp(3) NULL,
+            deleted_at timestamp(3) NULL
+        )
+    `)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create filter_options table: %w", result.Error)
+	}
+
+	// Create indexes for filter_options
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_options_deleted_at ON filter_options(deleted_at)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_options_filter_category_id ON filter_options(filter_category_id)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_options_value ON filter_options(value)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_options_is_active ON filter_options(is_active)")
+	DB.Exec("CREATE INDEX IF NOT EXISTS idx_filter_options_sort_order ON filter_options(sort_order)")
+
 	fmt.Println("Tables created/verified successfully")
 	return nil
 }

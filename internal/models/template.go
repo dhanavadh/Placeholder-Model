@@ -63,7 +63,14 @@ type Template struct {
 	Tier           Tier         `gorm:"type:varchar(20)" json:"tier"` // Required tier to access
 	Group          string       `gorm:"column:\"group\"" json:"group"` // Group for variations (e.g., ID card variations)
 
-	Documents []Document `gorm:"foreignKey:TemplateID" json:"documents,omitempty"`
+	// Document Type grouping - links template to a logical document type
+	DocumentTypeID string        `gorm:"index" json:"document_type_id"` // FK to document_types table
+	VariantName    string        `json:"variant_name"`                   // Name of this variant (e.g., "ด้านหน้า", "ด้านหลัง")
+	VariantOrder   int           `gorm:"default:0" json:"variant_order"` // Display order within document type
+
+	// Relations
+	DocumentType *DocumentType `gorm:"foreignKey:DocumentTypeID" json:"document_type,omitempty"`
+	Documents    []Document    `gorm:"foreignKey:TemplateID" json:"documents,omitempty"`
 }
 
 func (Template) TableName() string {

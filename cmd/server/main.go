@@ -68,6 +68,7 @@ func main() {
 
 	// Initialize services
 	templateService := services.NewTemplateService(storageClient)
+	documentTypeService := services.NewDocumentTypeService()
 
 	// Initialize PDF service with configurable timeout
 	pdfService, err := services.NewPDFService(cfg.Gotenberg.URL, cfg.Gotenberg.Timeout)
@@ -84,6 +85,8 @@ func main() {
 	entityRuleService := services.NewEntityRuleService()
 	dataTypeService := services.NewDataTypeService()
 	inputTypeService := services.NewInputTypeService()
+	statisticsService := services.NewStatisticsService()
+	filterService := services.NewFilterService()
 
 	// Initialize default field rules if none exist
 	if err := fieldRuleService.InitializeDefaultRules(); err != nil {
@@ -105,8 +108,13 @@ func main() {
 		log.Printf("Warning: Failed to initialize default input types: %v", err)
 	}
 
+	// Initialize default filters if none exist
+	if err := filterService.InitializeDefaultFilters(); err != nil {
+		log.Printf("Warning: Failed to initialize default filters: %v", err)
+	}
+
 	// Initialize handlers
-	docxHandler := handlers.NewDocxHandler(templateService, documentService)
+	docxHandler := handlers.NewDocxHandler(templateService, documentService, statisticsService)
 	// Set storage info based on storage type
 	if cfg.Storage.Type == "local" {
 		docxHandler.SetStorageInfo(cfg.Storage.LocalPath)
@@ -118,6 +126,9 @@ func main() {
 	entityRuleHandler := handlers.NewEntityRuleHandler(entityRuleService)
 	dataTypeHandler := handlers.NewDataTypeHandler(dataTypeService, inputTypeService)
 	ocrHandler := handlers.NewOCRHandler()
+	statisticsHandler := handlers.NewStatisticsHandler(statisticsService)
+	documentTypeHandler := handlers.NewDocumentTypeHandler(documentTypeService)
+	filterHandler := handlers.NewFilterHandler(filterService)
 
 	// Initialize Gin router
 	r := gin.Default()
@@ -277,6 +288,45 @@ func main() {
 		// OCR endpoints
 		v1.POST("/ocr/extract", ocrHandler.ExtractText)
 		v1.POST("/templates/:templateId/ocr", ocrHandler.ExtractForTemplate)
+
+		// Statistics endpoints
+		v1.GET("/stats", statisticsHandler.GetAll)
+		v1.GET("/stats/summary", statisticsHandler.GetSummary)
+		v1.GET("/stats/templates", statisticsHandler.GetTemplateStats)
+		v1.GET("/stats/templates/:templateId", statisticsHandler.GetStatsByTemplate)
+		v1.GET("/stats/trends", statisticsHandler.GetTrends)
+		v1.GET("/stats/trends/:eventType", statisticsHandler.GetTimeSeries)
+
+		// Document type management (for grouping related templates)
+		v1.GET("/document-types", documentTypeHandler.GetAllDocumentTypes)
+		v1.GET("/document-types/categories", documentTypeHandler.GetCategories)
+		v1.GET("/document-types/suggestions", documentTypeHandler.GetAutoSuggestions)
+		v1.GET("/document-types/suggestions/:templateId", documentTypeHandler.GetSuggestionForTemplate)
+		v1.POST("/document-types/suggestions/apply", documentTypeHandler.ApplySuggestion)
+		v1.POST("/document-types/auto-group", documentTypeHandler.AutoGroupAll)
+		v1.GET("/document-types/code/:code", documentTypeHandler.GetDocumentTypeByCode)
+		v1.GET("/document-types/:id", documentTypeHandler.GetDocumentType)
+		v1.POST("/document-types", documentTypeHandler.CreateDocumentType)
+		v1.PUT("/document-types/:id", documentTypeHandler.UpdateDocumentType)
+		v1.DELETE("/document-types/:id", documentTypeHandler.DeleteDocumentType)
+		v1.GET("/document-types/:id/templates", documentTypeHandler.GetTemplates)
+		v1.POST("/document-types/:id/templates", documentTypeHandler.AssignTemplate)
+		v1.POST("/document-types/:id/templates/bulk", documentTypeHandler.BulkAssignTemplates)
+		v1.DELETE("/document-types/:id/templates/:templateId", documentTypeHandler.UnassignTemplate)
+
+		// Filter management (for configurable search filters)
+		v1.GET("/filters", filterHandler.GetAllFilters)
+		v1.GET("/filters/categories", filterHandler.GetAllCategories)
+		v1.GET("/filters/categories/:id", filterHandler.GetCategory)
+		v1.POST("/filters/categories", filterHandler.CreateCategory)
+		v1.PUT("/filters/categories/:id", filterHandler.UpdateCategory)
+		v1.DELETE("/filters/categories/:id", filterHandler.DeleteCategory)
+		v1.GET("/filters/categories/:id/options", filterHandler.GetOptions)
+		v1.GET("/filters/options/:id", filterHandler.GetOption)
+		v1.POST("/filters/options", filterHandler.CreateOption)
+		v1.PUT("/filters/options/:id", filterHandler.UpdateOption)
+		v1.DELETE("/filters/options/:id", filterHandler.DeleteOption)
+		v1.POST("/filters/initialize", filterHandler.InitializeDefaultFilters)
 	}
 
 	// Create HTTP server with increased timeouts for document processing
