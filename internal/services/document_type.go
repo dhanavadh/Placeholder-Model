@@ -18,29 +18,31 @@ func NewDocumentTypeService() *DocumentTypeService {
 
 // CreateDocumentTypeRequest contains fields for creating a document type
 type CreateDocumentTypeRequest struct {
-	Code        string `json:"code"`
-	Name        string `json:"name"`
-	NameEN      string `json:"name_en"`
-	Description string `json:"description"`
-	Category    string `json:"category"`
-	Icon        string `json:"icon"`
-	Color       string `json:"color"`
-	SortOrder   int    `json:"sort_order"`
-	Metadata    string `json:"metadata"`
+	Code           string `json:"code"`
+	Name           string `json:"name"`
+	NameEN         string `json:"name_en"`
+	Description    string `json:"description"`
+	OriginalSource string `json:"original_source"`
+	Category       string `json:"category"`
+	Icon           string `json:"icon"`
+	Color          string `json:"color"`
+	SortOrder      int    `json:"sort_order"`
+	Metadata       string `json:"metadata"`
 }
 
 // UpdateDocumentTypeRequest contains fields for updating a document type
 type UpdateDocumentTypeRequest struct {
-	Code        string `json:"code"`
-	Name        string `json:"name"`
-	NameEN      string `json:"name_en"`
-	Description string `json:"description"`
-	Category    string `json:"category"`
-	Icon        string `json:"icon"`
-	Color       string `json:"color"`
-	SortOrder   *int   `json:"sort_order"`
-	IsActive    *bool  `json:"is_active"`
-	Metadata    string `json:"metadata"`
+	Code           string `json:"code"`
+	Name           string `json:"name"`
+	NameEN         string `json:"name_en"`
+	Description    string `json:"description"`
+	OriginalSource string `json:"original_source"`
+	Category       string `json:"category"`
+	Icon           string `json:"icon"`
+	Color          string `json:"color"`
+	SortOrder      *int   `json:"sort_order"`
+	IsActive       *bool  `json:"is_active"`
+	Metadata       string `json:"metadata"`
 }
 
 // TemplateAssignment represents a template assignment to a document type
@@ -65,17 +67,18 @@ func (s *DocumentTypeService) Create(req *CreateDocumentTypeRequest) (*models.Do
 	}
 
 	docType := &models.DocumentType{
-		ID:          uuid.New().String(),
-		Code:        req.Code,
-		Name:        req.Name,
-		NameEN:      req.NameEN,
-		Description: req.Description,
-		Category:    req.Category,
-		Icon:        req.Icon,
-		Color:       req.Color,
-		SortOrder:   req.SortOrder,
-		IsActive:    true,
-		Metadata:    metadata,
+		ID:             uuid.New().String(),
+		Code:           req.Code,
+		Name:           req.Name,
+		NameEN:         req.NameEN,
+		Description:    req.Description,
+		OriginalSource: req.OriginalSource,
+		Category:       req.Category,
+		Icon:           req.Icon,
+		Color:          req.Color,
+		SortOrder:      req.SortOrder,
+		IsActive:       true,
+		Metadata:       metadata,
 	}
 
 	if err := internal.DB.Create(docType).Error; err != nil {
@@ -181,6 +184,9 @@ func (s *DocumentTypeService) Update(id string, req *UpdateDocumentTypeRequest) 
 	}
 	if req.Description != "" {
 		docType.Description = req.Description
+	}
+	if req.OriginalSource != "" {
+		docType.OriginalSource = req.OriginalSource
 	}
 	if req.Category != "" {
 		docType.Category = req.Category

@@ -13,8 +13,9 @@ type DocumentType struct {
 	Code        string         `gorm:"uniqueIndex;not null" json:"code"`        // Unique code for the document type (e.g., "thai_id_card")
 	Name        string         `gorm:"not null" json:"name"`                     // Display name (e.g., "บัตรประชาชน")
 	NameEN      string         `json:"name_en"`                                  // English name (e.g., "Thai ID Card")
-	Description string         `json:"description"`                              // Description of the document type
-	Category    string         `gorm:"type:varchar(50)" json:"category"`         // Category (e.g., "identification", "certificate", "contract")
+	Description    string         `json:"description"`                              // Description of the document type
+	OriginalSource string         `json:"original_source"`                          // Source/origin of the document type
+	Category       string         `gorm:"type:varchar(50)" json:"category"`         // Category (e.g., "identification", "certificate", "contract")
 	Icon        string         `json:"icon"`                                     // Icon name/path for UI
 	Color       string         `json:"color"`                                    // Color code for UI (e.g., "#FF5733")
 	SortOrder   int            `gorm:"default:0" json:"sort_order"`              // Display order
