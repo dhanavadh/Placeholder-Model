@@ -257,3 +257,108 @@ func (p *LibreOfficeProcessor) DetectOrientation() (bool, error) {
 
 	return proc.DetectOrientation()
 }
+
+// ConvertToPDF converts a DOCX file to PDF using LibreOffice
+// This can replace Gotenberg for PDF conversion
+func ConvertToPDF(inputDocx, outputPdf string) error {
+	loPath := FindLibreOffice()
+	if loPath == "" {
+		return fmt.Errorf("LibreOffice not found on system")
+	}
+
+	return ConvertToPDFWithPath(loPath, inputDocx, outputPdf)
+}
+
+// ConvertToPDFWithPath converts DOCX to PDF using specified LibreOffice path
+func ConvertToPDFWithPath(loPath, inputDocx, outputPdf string) error {
+	absInputPath, err := filepath.Abs(inputDocx)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute input path: %w", err)
+	}
+
+	outDir, err := filepath.Abs(filepath.Dir(outputPdf))
+	if err != nil {
+		return fmt.Errorf("failed to get absolute output dir: %w", err)
+	}
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Create unique user profile to avoid conflicts
+	profileDir := filepath.Join(os.TempDir(), fmt.Sprintf("lo_pdf_%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		return fmt.Errorf("failed to create profile directory: %w", err)
+	}
+	defer os.RemoveAll(profileDir)
+
+	cmd := exec.Command(loPath,
+		"--headless",
+		"--invisible",
+		"--nofirststartwizard",
+		"--norestore",
+		"--convert-to", "pdf",
+		"--outdir", outDir,
+		fmt.Sprintf("-env:UserInstallation=file://%s", profileDir),
+		absInputPath,
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Set timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("LibreOffice PDF conversion failed: %v, stderr: %s", err, stderr.String())
+		}
+	case <-time.After(60 * time.Second):
+		cmd.Process.Kill()
+		return fmt.Errorf("LibreOffice PDF conversion timed out after 60 seconds")
+	}
+
+	// LibreOffice outputs with .pdf extension in outDir
+	baseName := filepath.Base(inputDocx)
+	// Remove .docx extension and add .pdf
+	pdfName := baseName
+	if len(pdfName) > 5 && pdfName[len(pdfName)-5:] == ".docx" {
+		pdfName = pdfName[:len(pdfName)-5] + ".pdf"
+	} else if len(pdfName) > 4 && pdfName[len(pdfName)-4:] == ".doc" {
+		pdfName = pdfName[:len(pdfName)-4] + ".pdf"
+	} else {
+		pdfName = pdfName + ".pdf"
+	}
+	convertedPath := filepath.Join(outDir, pdfName)
+
+	// Rename to expected output path if different
+	if convertedPath != outputPdf {
+		if err := os.Rename(convertedPath, outputPdf); err != nil {
+			// If rename fails, try copy
+			if err := copyFile(convertedPath, outputPdf); err != nil {
+				return fmt.Errorf("failed to move PDF file: %w", err)
+			}
+			os.Remove(convertedPath)
+		}
+	}
+
+	// Verify output exists
+	if _, err := os.Stat(outputPdf); os.IsNotExist(err) {
+		return fmt.Errorf("PDF output file was not created")
+	}
+
+	return nil
+}
+
+// ConvertToPDFWithOrientation converts DOCX to PDF with optional landscape orientation
+// Note: LibreOffice respects the document's built-in orientation, so this parameter
+// is mainly for compatibility with the Gotenberg interface
+func ConvertToPDFWithOrientation(inputDocx, outputPdf string, landscape bool) error {
+	// LibreOffice automatically uses the document's orientation
+	// The landscape parameter is kept for API compatibility
+	return ConvertToPDF(inputDocx, outputPdf)
+}

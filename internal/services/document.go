@@ -169,75 +169,80 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 		return nil, fmt.Errorf("failed to upload processed document to GCS: %w", err)
 	}
 
-	// Generate PDF using optimized Gotenberg and upload to GCS quickly
+	// Generate PDF and upload to GCS
 	var pdfObjectName string
 	var pdfGCSPath string
-	fmt.Printf("[DEBUG] Starting optimized PDF generation for document %s\n", documentID)
-	if s.pdfService != nil {
-		fmt.Printf("[DEBUG] PDF service is available, proceeding with fast conversion\n")
-		// Re-open the DOCX file for PDF conversion
+	fmt.Printf("[DEBUG] Starting PDF generation for document %s\n", documentID)
+
+	tempPDFPath := filepath.Join(os.TempDir(), documentID+"_output.pdf")
+	var pdfErr error
+	pdfConverted := false
+
+	// Use LibreOffice first if enabled (preferred - no external service needed)
+	if s.useLibreOffice && processor.IsLibreOfficeAvailable() {
+		fmt.Printf("[DEBUG] Using LibreOffice for PDF conversion\n")
+		pdfErr = processor.ConvertToPDF(tempOutputFile, tempPDFPath)
+		if pdfErr != nil {
+			fmt.Printf("[ERROR] LibreOffice PDF conversion failed: %v\n", pdfErr)
+		} else {
+			pdfConverted = true
+		}
+	}
+
+	// Fall back to Gotenberg if LibreOffice failed or unavailable
+	if !pdfConverted && s.pdfService != nil {
+		fmt.Printf("[DEBUG] Using Gotenberg for PDF conversion\n")
 		docxFile, err := os.Open(tempOutputFile)
 		if err == nil {
 			defer docxFile.Close()
-			fmt.Printf("[DEBUG] Successfully opened DOCX file for PDF conversion: %s\n", tempOutputFile)
 
-			// Detect orientation from the processed DOCX
+			// Detect orientation
 			landscape := false
 			if loProc != nil {
 				if orientation, err := loProc.DetectOrientation(); err == nil {
 					landscape = orientation
-					fmt.Printf("[DEBUG] Detected orientation: landscape=%v\n", landscape)
-				} else {
-					fmt.Printf("Warning: failed to detect orientation: %v\n", err)
 				}
 			} else if proc != nil {
 				if orientation, err := proc.DetectOrientation(); err == nil {
 					landscape = orientation
-					fmt.Printf("[DEBUG] Detected orientation: landscape=%v\n", landscape)
-				} else {
-					fmt.Printf("Warning: failed to detect orientation: %v\n", err)
 				}
 			}
 
-			// Convert DOCX to PDF with super-fast optimized Gotenberg (~200ms)
-			fmt.Printf("[DEBUG] Starting lightning-fast PDF conversion and upload...\n")
-			tempPDFPath := filepath.Join(os.TempDir(), documentID+"_output.pdf")
-
-			// Use Gotenberg's Store method to save directly to temp file (ultra-fast)
-			err = s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape)
-			if err != nil {
-				fmt.Printf("[ERROR] Failed to convert DOCX to PDF: %v\n", err)
+			pdfErr = s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape)
+			if pdfErr != nil {
+				fmt.Printf("[ERROR] Gotenberg conversion failed: %v\n", pdfErr)
 			} else {
-				fmt.Printf("[DEBUG] PDF conversion successful in ~200ms, uploading from temp file...\n")
-				defer os.Remove(tempPDFPath) // Clean up temp file
+				pdfConverted = true
+			}
+		}
+	}
 
-				// Open the temp PDF file and upload to GCS
-				pdfFile, err := os.Open(tempPDFPath)
+	if !pdfConverted {
+		fmt.Printf("[DEBUG] No PDF converter available (LibreOffice: %v, Gotenberg: %v)\n",
+			s.useLibreOffice && processor.IsLibreOfficeAvailable(), s.pdfService != nil)
+	}
+
+	// Upload PDF if conversion succeeded
+	if pdfConverted {
+		if _, err := os.Stat(tempPDFPath); err == nil {
+			fmt.Printf("[DEBUG] PDF conversion successful, uploading...\n")
+			defer os.Remove(tempPDFPath)
+
+			pdfFile, err := os.Open(tempPDFPath)
+			if err == nil {
+				defer pdfFile.Close()
+
+				pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
+				_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
 				if err != nil {
-					fmt.Printf("[ERROR] Failed to open temp PDF file: %v\n", err)
+					fmt.Printf("[ERROR] Failed to upload PDF: %v\n", err)
+					pdfObjectName = ""
 				} else {
-					defer pdfFile.Close()
-
-					// Upload PDF to GCS from file - much more reliable than streaming
-					pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
-					fmt.Printf("[DEBUG] Generated PDF object name: %s\n", pdfObjectName)
-
-					_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
-					if err != nil {
-						fmt.Printf("[ERROR] Failed to upload PDF to GCS: %v\n", err)
-						// Don't set pdfObjectName if upload failed
-						pdfObjectName = ""
-					} else {
-						pdfGCSPath = pdfObjectName
-						fmt.Printf("[DEBUG] PDF successfully uploaded to GCS: %s\n", pdfGCSPath)
-					}
+					pdfGCSPath = pdfObjectName
+					fmt.Printf("[DEBUG] PDF uploaded successfully: %s\n", pdfGCSPath)
 				}
 			}
-		} else {
-			fmt.Printf("[ERROR] Failed to reopen DOCX file for PDF conversion: %v\n", err)
 		}
-	} else {
-		fmt.Printf("[DEBUG] PDF service is nil, skipping PDF generation\n")
 	}
 
 	// Convert data to JSON
@@ -566,7 +571,18 @@ func (s *DocumentService) RegenerateDocument(ctx context.Context, documentID str
 	// Generate PDF
 	var pdfObjectName string
 	var pdfGCSPath string
-	if s.pdfService != nil {
+	tempPDFPath := filepath.Join(os.TempDir(), documentID+"_regen.pdf")
+	pdfConverted := false
+
+	// Use LibreOffice first if enabled
+	if s.useLibreOffice && processor.IsLibreOfficeAvailable() {
+		if err := processor.ConvertToPDF(tempOutputFile, tempPDFPath); err == nil {
+			pdfConverted = true
+		}
+	}
+
+	// Fall back to Gotenberg if LibreOffice failed or unavailable
+	if !pdfConverted && s.pdfService != nil {
 		docxFile, err := os.Open(tempOutputFile)
 		if err == nil {
 			defer docxFile.Close()
@@ -582,20 +598,25 @@ func (s *DocumentService) RegenerateDocument(ctx context.Context, documentID str
 				}
 			}
 
-			tempPDFPath := filepath.Join(os.TempDir(), documentID+"_regen.pdf")
-			err = s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape)
+			if err := s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape); err == nil {
+				pdfConverted = true
+			}
+		}
+	}
+
+	// Upload PDF if conversion succeeded
+	if pdfConverted {
+		if _, err := os.Stat(tempPDFPath); err == nil {
+			defer os.Remove(tempPDFPath)
+
+			pdfFile, err := os.Open(tempPDFPath)
 			if err == nil {
-				defer os.Remove(tempPDFPath)
+				defer pdfFile.Close()
 
-				pdfFile, err := os.Open(tempPDFPath)
+				pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
+				_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
 				if err == nil {
-					defer pdfFile.Close()
-
-					pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
-					_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
-					if err == nil {
-						pdfGCSPath = pdfObjectName
-					}
+					pdfGCSPath = pdfObjectName
 				}
 			}
 		}
