@@ -80,6 +80,13 @@ func main() {
 	}
 
 	documentService := services.NewDocumentService(storageClient, templateService, pdfService)
+
+	// Configure LibreOffice processing if enabled
+	if cfg.LibreOffice.Enabled {
+		log.Printf("LibreOffice processing enabled")
+		documentService.SetLibreOfficeConfig(cfg.LibreOffice.Enabled, cfg.LibreOffice.Path)
+	}
+
 	activityLogService := services.NewActivityLogService()
 	fieldRuleService := services.NewFieldRuleService()
 	entityRuleService := services.NewEntityRuleService()
