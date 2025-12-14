@@ -149,86 +149,155 @@ func (dp *DocxProcessor) replaceWithXMLHandling(content, placeholder, value stri
 		return strings.ReplaceAll(content, placeholder, value)
 	}
 
-	fmt.Printf("[DEBUG] No exact match found, using XML-aware replacement\n")
+	fmt.Printf("[DEBUG] No exact match found, attempting XML-safe replacement\n")
 
-	// Use a more robust approach to handle XML-split placeholders
-	// This approach is safer and won't hang
-	result := dp.replaceXMLSafeSlow(content, placeholder, value)
+	// Use the safer approach that properly handles XML structure
+	result, replaced := dp.replaceXMLSplit(content, placeholder, value)
+	if replaced {
+		fmt.Printf("[DEBUG] XML-safe replacement completed successfully\n")
+	} else {
+		fmt.Printf("[DEBUG] WARNING: Could not replace split placeholder %s - document may need manual fixing\n", placeholder)
+	}
 
-	fmt.Printf("[DEBUG] XML-aware replacement completed\n")
 	return result
 }
 
-// More robust but slower XML-aware replacement that won't hang
-func (dp *DocxProcessor) replaceXMLSafeSlow(content, placeholder, value string) string {
-    // This is a corrected implementation that should not hang and correctly replaces placeholders.
-    var result strings.Builder
-    contentRunes := []rune(content)
-    placeholderRunes := []rune(placeholder)
-    i := 0
-    for i < len(contentRunes) {
-        // Use the corrected checkXMLSafeMatch function
-        match, endPos := dp.checkXMLSafeMatch(contentRunes, i, placeholderRunes)
-        if match {
-            result.WriteString(value)
-            i = endPos
-        } else {
-            result.WriteRune(contentRunes[i])
-            i++
-        }
-    }
-    return result.String()
-}
+// replaceXMLSplit handles placeholders that are split across XML text nodes
+// It finds text within <w:t> tags and handles placeholders that span multiple tags
+func (dp *DocxProcessor) replaceXMLSplit(content, placeholder, value string) (string, bool) {
+	// Find all text content between <w:t> tags and track their positions
+	type textSpan struct {
+		start int    // Start position in content (after <w:t>)
+		end   int    // End position in content (before </w:t>)
+		text  string // The text content
+	}
 
-// Safe placeholder matching that handles XML tags properly
-func (dp *DocxProcessor) checkXMLSafeMatch(content []rune, startPos int, placeholderRunes []rune) (bool, int) {
-    if startPos >= len(content) {
-        return false, startPos
-    }
+	var spans []textSpan
+	pos := 0
 
-    placeholderIdx := 0
-    contentIdx := startPos
-    inTag := false
+	for {
+		// Find <w:t> or <w:t ...>
+		tagStart := strings.Index(content[pos:], "<w:t")
+		if tagStart == -1 {
+			break
+		}
+		tagStart += pos
 
-    // Keep track of the actual content characters that form the placeholder
-    matchChars := make([]rune, 0, len(placeholderRunes))
+		// Find end of opening tag
+		tagEnd := strings.Index(content[tagStart:], ">")
+		if tagEnd == -1 {
+			break
+		}
+		tagEnd += tagStart + 1
 
-    // The end position of the match in the original content
-    matchEndPos := startPos
+		// Find </w:t>
+		closeTag := strings.Index(content[tagEnd:], "</w:t>")
+		if closeTag == -1 {
+			pos = tagEnd
+			continue
+		}
+		closeTag += tagEnd
 
-    for contentIdx < len(content) && placeholderIdx < len(placeholderRunes) {
-        char := content[contentIdx]
+		spans = append(spans, textSpan{
+			start: tagEnd,
+			end:   closeTag,
+			text:  content[tagEnd:closeTag],
+		})
 
-        if char == '<' {
-            inTag = true
-        } else if char == '>' {
-            inTag = false
-        } else if !inTag {
-            // Only match if outside a tag
-            if char == placeholderRunes[placeholderIdx] {
-                matchChars = append(matchChars, char)
-                placeholderIdx++
-                matchEndPos = contentIdx + 1
-            } else {
-                // If there is a mismatch, this is not a valid placeholder sequence.
-                return false, startPos
-            }
-        }
-        
-        contentIdx++
+		pos = closeTag + 6
+	}
 
-        // Safety break to prevent infinite loops in malformed XML
-        if contentIdx - startPos > len(content) {
-            return false, startPos
-        }
-    }
+	if len(spans) == 0 {
+		return content, false
+	}
 
-    // Check if the full placeholder was matched
-    if placeholderIdx == len(placeholderRunes) {
-        return true, matchEndPos
-    }
+	// Concatenate all text to find placeholder
+	var fullText strings.Builder
+	for _, span := range spans {
+		fullText.WriteString(span.text)
+	}
+	concatenated := fullText.String()
 
-    return false, startPos
+	// Find placeholder in concatenated text
+	idx := strings.Index(concatenated, placeholder)
+	if idx == -1 {
+		return content, false
+	}
+
+	// Find which spans contain the placeholder
+	charCount := 0
+	startSpanIdx := -1
+	startOffset := 0
+	endSpanIdx := -1
+	endOffset := 0
+
+	placeholderEnd := idx + len(placeholder)
+
+	for i, span := range spans {
+		spanStart := charCount
+		spanEnd := charCount + len(span.text)
+
+		// Check if placeholder starts in this span
+		if startSpanIdx == -1 && idx >= spanStart && idx < spanEnd {
+			startSpanIdx = i
+			startOffset = idx - spanStart
+		}
+
+		// Check if placeholder ends in this span
+		if placeholderEnd > spanStart && placeholderEnd <= spanEnd {
+			endSpanIdx = i
+			endOffset = placeholderEnd - spanStart
+			break
+		}
+
+		charCount = spanEnd
+	}
+
+	if startSpanIdx == -1 || endSpanIdx == -1 {
+		return content, false
+	}
+
+	// Build the result by modifying the spans
+	var result strings.Builder
+	lastEnd := 0
+
+	for i, span := range spans {
+		// Copy content before this span
+		result.WriteString(content[lastEnd:span.start])
+
+		if i == startSpanIdx && i == endSpanIdx {
+			// Placeholder is within a single span
+			newText := span.text[:startOffset] + value + span.text[endOffset:]
+			result.WriteString(newText)
+		} else if i == startSpanIdx {
+			// Start of placeholder - put replacement value here
+			newText := span.text[:startOffset] + value
+			result.WriteString(newText)
+		} else if i > startSpanIdx && i < endSpanIdx {
+			// Middle spans - empty them
+			// (text is already consumed by the replacement)
+		} else if i == endSpanIdx {
+			// End of placeholder - keep text after placeholder
+			newText := span.text[endOffset:]
+			result.WriteString(newText)
+		} else {
+			// Not part of placeholder - keep as-is
+			result.WriteString(span.text)
+		}
+
+		lastEnd = span.end
+	}
+
+	// Copy remaining content after last span
+	result.WriteString(content[lastEnd:])
+
+	// Recursively replace if there are more occurrences
+	resultStr := result.String()
+	if strings.Contains(dp.removeXMLTags(resultStr), placeholder) {
+		return dp.replaceXMLSplit(resultStr, placeholder, value)
+	}
+
+	return resultStr, true
 }
 
 func (dp *DocxProcessor) checkPlaceholderMatch(content string, startPos int, placeholder string) (bool, int) {

@@ -9,11 +9,17 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig    `json:"server"`
-	Database  DatabaseConfig  `json:"database"`
-	Storage   StorageConfig   `json:"storage"`
-	GCS       GCSConfig       `json:"gcs"`
-	Gotenberg GotenbergConfig `json:"gotenberg"`
+	Server      ServerConfig      `json:"server"`
+	Database    DatabaseConfig    `json:"database"`
+	Storage     StorageConfig     `json:"storage"`
+	GCS         GCSConfig         `json:"gcs"`
+	Gotenberg   GotenbergConfig   `json:"gotenberg"`
+	LibreOffice LibreOfficeConfig `json:"libreoffice"`
+}
+
+type LibreOfficeConfig struct {
+	Enabled bool   `json:"enabled"` // Enable LibreOffice-based DOCX processing for better format preservation
+	Path    string `json:"path"`    // Path to LibreOffice executable (auto-detected if empty)
 }
 
 type StorageConfig struct {
@@ -128,6 +134,10 @@ func Load() (*Config, error) {
 		Gotenberg: GotenbergConfig{
 			URL:     getEnv("GOTENBERG_URL", "http://localhost:3000"),
 			Timeout: getEnv("GOTENBERG_TIMEOUT", "30s"), // Faster timeout for optimized Gotenberg
+		},
+		LibreOffice: LibreOfficeConfig{
+			Enabled: getEnv("LIBREOFFICE_ENABLED", "false") == "true",
+			Path:    getEnv("LIBREOFFICE_PATH", ""), // Auto-detected if empty
 		},
 	}
 

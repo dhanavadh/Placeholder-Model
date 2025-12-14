@@ -21,14 +21,26 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app/server ./cmd
 
 # ---
 
-# Start a new stage from scratch for a smaller final image
-FROM gcr.io/distroless/static-debian11
+# Use Debian for LibreOffice support (PDF conversion)
+FROM debian:bookworm-slim
+
+# Install LibreOffice Writer and Thai fonts for PDF conversion
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-writer \
+    fonts-thai-tlwg \
+    fonts-noto-cjk \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/*
 
 # Set the Current Working Directory inside the container
 WORKDIR /app
 
 # Copy the Pre-built binary file from the previous stage
 COPY --from=builder /app/server .
+
+# Enable LibreOffice for PDF conversion
+ENV LIBREOFFICE_ENABLED=true
 
 # Expose port 8081 to the outside world
 EXPOSE 8081

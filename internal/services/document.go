@@ -17,9 +17,11 @@ import (
 )
 
 type DocumentService struct {
-	storageClient   storage.StorageClient
-	templateService *TemplateService
-	pdfService      *PDFService
+	storageClient       storage.StorageClient
+	templateService     *TemplateService
+	pdfService          *PDFService
+	useLibreOffice      bool   // Use LibreOffice for better format preservation
+	libreOfficePath     string // Path to LibreOffice (empty for auto-detect)
 }
 
 func NewDocumentService(storageClient storage.StorageClient, templateService *TemplateService, pdfService *PDFService) *DocumentService {
@@ -27,6 +29,21 @@ func NewDocumentService(storageClient storage.StorageClient, templateService *Te
 		storageClient:   storageClient,
 		templateService: templateService,
 		pdfService:      pdfService,
+		useLibreOffice:  false,
+	}
+}
+
+// SetLibreOfficeConfig enables or disables LibreOffice-based processing
+func (s *DocumentService) SetLibreOfficeConfig(enabled bool, path string) {
+	s.useLibreOffice = enabled
+	s.libreOfficePath = path
+	if enabled {
+		if processor.IsLibreOfficeAvailable() {
+			fmt.Printf("[INFO] LibreOffice processing enabled (path: %s)\n", processor.FindLibreOffice())
+		} else {
+			fmt.Printf("[WARN] LibreOffice enabled but not found on system, falling back to standard processor\n")
+			s.useLibreOffice = false
+		}
 	}
 }
 
@@ -64,24 +81,48 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 	tempOutputFile := filepath.Join(os.TempDir(), documentID+".docx")
 	fmt.Printf("[DEBUG] Created document ID: %s, temp output file: %s\n", documentID, tempOutputFile)
 
-	// Process document
+	// Process document - choose processor based on configuration
 	fmt.Printf("[DEBUG] Creating DOCX processor with input: %s, output: %s\n", tempInputFile, tempOutputFile)
-	proc := processor.NewDocxProcessor(tempInputFile, tempOutputFile)
-	fmt.Printf("[DEBUG] DOCX processor created successfully, starting unzip...\n")
-	if err := proc.UnzipDocx(); err != nil {
-		return nil, fmt.Errorf("failed to unzip document: %w", err)
-	}
-	fmt.Printf("[DEBUG] DOCX unzip completed successfully\n")
-	defer proc.Cleanup()
 
-	// Get placeholders and prepare complete data
-	fmt.Printf("[DEBUG] Starting placeholder extraction...\n")
-	placeholders, err := proc.ExtractPlaceholders()
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract placeholders: %w", err)
-	}
-	fmt.Printf("[DEBUG] Placeholder extraction completed, found %d placeholders\n", len(placeholders))
+	var placeholders []string
+	var proc *processor.DocxProcessor
+	var loProc *processor.LibreOfficeProcessor
 
+	if s.useLibreOffice && processor.IsLibreOfficeAvailable() {
+		// Use LibreOffice processor for better format preservation
+		fmt.Printf("[DEBUG] Using LibreOffice processor for better format preservation\n")
+		loProc = processor.NewLibreOfficeProcessor(tempInputFile, tempOutputFile)
+		defer loProc.Cleanup()
+
+		// Extract placeholders
+		fmt.Printf("[DEBUG] Starting placeholder extraction...\n")
+		placeholders, err = loProc.ExtractPlaceholders()
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract placeholders: %w", err)
+		}
+		fmt.Printf("[DEBUG] Placeholder extraction completed, found %d placeholders\n", len(placeholders))
+
+	} else {
+		// Use standard DocxProcessor
+		fmt.Printf("[DEBUG] Using standard DOCX processor\n")
+		proc = processor.NewDocxProcessor(tempInputFile, tempOutputFile)
+		fmt.Printf("[DEBUG] DOCX processor created successfully, starting unzip...\n")
+		if err := proc.UnzipDocx(); err != nil {
+			return nil, fmt.Errorf("failed to unzip document: %w", err)
+		}
+		fmt.Printf("[DEBUG] DOCX unzip completed successfully\n")
+		defer proc.Cleanup()
+
+		// Get placeholders
+		fmt.Printf("[DEBUG] Starting placeholder extraction...\n")
+		placeholders, err = proc.ExtractPlaceholders()
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract placeholders: %w", err)
+		}
+		fmt.Printf("[DEBUG] Placeholder extraction completed, found %d placeholders\n", len(placeholders))
+	}
+
+	// Prepare complete data
 	fmt.Printf("[DEBUG] Preparing data for %d placeholders...\n", len(placeholders))
 	completeData := make(map[string]string)
 	for i, placeholder := range placeholders {
@@ -93,17 +134,26 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 		fmt.Printf("[DEBUG] Placeholder %d/%d: %s -> '%s'\n", i+1, len(placeholders), placeholder, completeData[placeholder])
 	}
 
-	// Replace placeholders
+	// Replace placeholders using the chosen processor
 	fmt.Printf("[DEBUG] Starting placeholder replacement for %d placeholders...\n", len(completeData))
-	if err := proc.FindAndReplaceInDocument(completeData); err != nil {
-		return nil, fmt.Errorf("failed to replace placeholders: %w", err)
-	}
-	fmt.Printf("[DEBUG] Placeholder replacement completed successfully\n")
+	if s.useLibreOffice && loProc != nil {
+		// Use LibreOffice for replacement
+		if err := loProc.ProcessWithPlaceholders(completeData); err != nil {
+			return nil, fmt.Errorf("failed to process with LibreOffice: %w", err)
+		}
+	} else if proc != nil {
+		// Use standard processor
+		if err := proc.FindAndReplaceInDocument(completeData); err != nil {
+			return nil, fmt.Errorf("failed to replace placeholders: %w", err)
+		}
+		fmt.Printf("[DEBUG] Placeholder replacement completed successfully\n")
 
-	// Re-zip document
-	if err := proc.ReZipDocx(); err != nil {
-		return nil, fmt.Errorf("failed to create output document: %w", err)
+		// Re-zip document
+		if err := proc.ReZipDocx(); err != nil {
+			return nil, fmt.Errorf("failed to create output document: %w", err)
+		}
 	}
+	fmt.Printf("[DEBUG] Document processing completed successfully\n")
 
 	// Upload processed DOCX document to GCS
 	outputFile, err := os.Open(tempOutputFile)
@@ -119,66 +169,80 @@ func (s *DocumentService) ProcessDocument(ctx context.Context, templateID string
 		return nil, fmt.Errorf("failed to upload processed document to GCS: %w", err)
 	}
 
-	// Generate PDF using optimized Gotenberg and upload to GCS quickly
+	// Generate PDF and upload to GCS
 	var pdfObjectName string
 	var pdfGCSPath string
-	fmt.Printf("[DEBUG] Starting optimized PDF generation for document %s\n", documentID)
-	if s.pdfService != nil {
-		fmt.Printf("[DEBUG] PDF service is available, proceeding with fast conversion\n")
-		// Re-open the DOCX file for PDF conversion
+	fmt.Printf("[DEBUG] Starting PDF generation for document %s\n", documentID)
+
+	tempPDFPath := filepath.Join(os.TempDir(), documentID+"_output.pdf")
+	var pdfErr error
+	pdfConverted := false
+
+	// Use LibreOffice first if enabled (preferred - no external service needed)
+	if s.useLibreOffice && processor.IsLibreOfficeAvailable() {
+		fmt.Printf("[DEBUG] Using LibreOffice for PDF conversion\n")
+		pdfErr = processor.ConvertToPDF(tempOutputFile, tempPDFPath)
+		if pdfErr != nil {
+			fmt.Printf("[ERROR] LibreOffice PDF conversion failed: %v\n", pdfErr)
+		} else {
+			pdfConverted = true
+		}
+	}
+
+	// Fall back to Gotenberg if LibreOffice failed or unavailable
+	if !pdfConverted && s.pdfService != nil {
+		fmt.Printf("[DEBUG] Using Gotenberg for PDF conversion\n")
 		docxFile, err := os.Open(tempOutputFile)
 		if err == nil {
 			defer docxFile.Close()
-			fmt.Printf("[DEBUG] Successfully opened DOCX file for PDF conversion: %s\n", tempOutputFile)
 
-			// Detect orientation from the processed DOCX
+			// Detect orientation
 			landscape := false
-			if orientation, err := proc.DetectOrientation(); err == nil {
-				landscape = orientation
-				fmt.Printf("[DEBUG] Detected orientation: landscape=%v\n", landscape)
-			} else {
-				fmt.Printf("Warning: failed to detect orientation: %v\n", err)
-			}
-
-			// Convert DOCX to PDF with super-fast optimized Gotenberg (~200ms)
-			fmt.Printf("[DEBUG] Starting lightning-fast PDF conversion and upload...\n")
-			tempPDFPath := filepath.Join(os.TempDir(), documentID+"_output.pdf")
-
-			// Use Gotenberg's Store method to save directly to temp file (ultra-fast)
-			err = s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape)
-			if err != nil {
-				fmt.Printf("[ERROR] Failed to convert DOCX to PDF: %v\n", err)
-			} else {
-				fmt.Printf("[DEBUG] PDF conversion successful in ~200ms, uploading from temp file...\n")
-				defer os.Remove(tempPDFPath) // Clean up temp file
-
-				// Open the temp PDF file and upload to GCS
-				pdfFile, err := os.Open(tempPDFPath)
-				if err != nil {
-					fmt.Printf("[ERROR] Failed to open temp PDF file: %v\n", err)
-				} else {
-					defer pdfFile.Close()
-
-					// Upload PDF to GCS from file - much more reliable than streaming
-					pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
-					fmt.Printf("[DEBUG] Generated PDF object name: %s\n", pdfObjectName)
-
-					_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
-					if err != nil {
-						fmt.Printf("[ERROR] Failed to upload PDF to GCS: %v\n", err)
-						// Don't set pdfObjectName if upload failed
-						pdfObjectName = ""
-					} else {
-						pdfGCSPath = pdfObjectName
-						fmt.Printf("[DEBUG] PDF successfully uploaded to GCS: %s\n", pdfGCSPath)
-					}
+			if loProc != nil {
+				if orientation, err := loProc.DetectOrientation(); err == nil {
+					landscape = orientation
+				}
+			} else if proc != nil {
+				if orientation, err := proc.DetectOrientation(); err == nil {
+					landscape = orientation
 				}
 			}
-		} else {
-			fmt.Printf("[ERROR] Failed to reopen DOCX file for PDF conversion: %v\n", err)
+
+			pdfErr = s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape)
+			if pdfErr != nil {
+				fmt.Printf("[ERROR] Gotenberg conversion failed: %v\n", pdfErr)
+			} else {
+				pdfConverted = true
+			}
 		}
-	} else {
-		fmt.Printf("[DEBUG] PDF service is nil, skipping PDF generation\n")
+	}
+
+	if !pdfConverted {
+		fmt.Printf("[DEBUG] No PDF converter available (LibreOffice: %v, Gotenberg: %v)\n",
+			s.useLibreOffice && processor.IsLibreOfficeAvailable(), s.pdfService != nil)
+	}
+
+	// Upload PDF if conversion succeeded
+	if pdfConverted {
+		if _, err := os.Stat(tempPDFPath); err == nil {
+			fmt.Printf("[DEBUG] PDF conversion successful, uploading...\n")
+			defer os.Remove(tempPDFPath)
+
+			pdfFile, err := os.Open(tempPDFPath)
+			if err == nil {
+				defer pdfFile.Close()
+
+				pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
+				_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
+				if err != nil {
+					fmt.Printf("[ERROR] Failed to upload PDF: %v\n", err)
+					pdfObjectName = ""
+				} else {
+					pdfGCSPath = pdfObjectName
+					fmt.Printf("[DEBUG] PDF uploaded successfully: %s\n", pdfGCSPath)
+				}
+			}
+		}
 	}
 
 	// Convert data to JSON
@@ -457,21 +521,37 @@ func (s *DocumentService) RegenerateDocument(ctx context.Context, documentID str
 	// Create temp output file (reuse same document ID)
 	tempOutputFile := filepath.Join(os.TempDir(), documentID+"_regen.docx")
 
-	// Process document
-	proc := processor.NewDocxProcessor(tempInputFile, tempOutputFile)
-	if err := proc.UnzipDocx(); err != nil {
-		return nil, fmt.Errorf("failed to unzip document: %w", err)
-	}
-	defer proc.Cleanup()
+	// Process document - choose processor based on configuration
+	var proc *processor.DocxProcessor
+	var loProc *processor.LibreOfficeProcessor
 
-	// Replace placeholders with stored data
-	if err := proc.FindAndReplaceInDocument(data); err != nil {
-		return nil, fmt.Errorf("failed to replace placeholders: %w", err)
-	}
+	if s.useLibreOffice && processor.IsLibreOfficeAvailable() {
+		// Use LibreOffice processor for better format preservation
+		fmt.Printf("[DEBUG] Regenerating with LibreOffice processor\n")
+		loProc = processor.NewLibreOfficeProcessor(tempInputFile, tempOutputFile)
+		defer loProc.Cleanup()
 
-	// Re-zip document
-	if err := proc.ReZipDocx(); err != nil {
-		return nil, fmt.Errorf("failed to create output document: %w", err)
+		// Process with LibreOffice
+		if err := loProc.ProcessWithPlaceholders(data); err != nil {
+			return nil, fmt.Errorf("failed to process with LibreOffice: %w", err)
+		}
+	} else {
+		// Use standard DocxProcessor
+		proc = processor.NewDocxProcessor(tempInputFile, tempOutputFile)
+		if err := proc.UnzipDocx(); err != nil {
+			return nil, fmt.Errorf("failed to unzip document: %w", err)
+		}
+		defer proc.Cleanup()
+
+		// Replace placeholders with stored data
+		if err := proc.FindAndReplaceInDocument(data); err != nil {
+			return nil, fmt.Errorf("failed to replace placeholders: %w", err)
+		}
+
+		// Re-zip document
+		if err := proc.ReZipDocx(); err != nil {
+			return nil, fmt.Errorf("failed to create output document: %w", err)
+		}
 	}
 
 	// Upload processed DOCX document to GCS
@@ -491,30 +571,52 @@ func (s *DocumentService) RegenerateDocument(ctx context.Context, documentID str
 	// Generate PDF
 	var pdfObjectName string
 	var pdfGCSPath string
-	if s.pdfService != nil {
+	tempPDFPath := filepath.Join(os.TempDir(), documentID+"_regen.pdf")
+	pdfConverted := false
+
+	// Use LibreOffice first if enabled
+	if s.useLibreOffice && processor.IsLibreOfficeAvailable() {
+		if err := processor.ConvertToPDF(tempOutputFile, tempPDFPath); err == nil {
+			pdfConverted = true
+		}
+	}
+
+	// Fall back to Gotenberg if LibreOffice failed or unavailable
+	if !pdfConverted && s.pdfService != nil {
 		docxFile, err := os.Open(tempOutputFile)
 		if err == nil {
 			defer docxFile.Close()
 
 			landscape := false
-			if orientation, err := proc.DetectOrientation(); err == nil {
-				landscape = orientation
+			if loProc != nil {
+				if orientation, err := loProc.DetectOrientation(); err == nil {
+					landscape = orientation
+				}
+			} else if proc != nil {
+				if orientation, err := proc.DetectOrientation(); err == nil {
+					landscape = orientation
+				}
 			}
 
-			tempPDFPath := filepath.Join(os.TempDir(), documentID+"_regen.pdf")
-			err = s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape)
+			if err := s.pdfService.ConvertDocxToPDFToFileWithOrientation(ctx, docxFile, template.Filename, tempPDFPath, landscape); err == nil {
+				pdfConverted = true
+			}
+		}
+	}
+
+	// Upload PDF if conversion succeeded
+	if pdfConverted {
+		if _, err := os.Stat(tempPDFPath); err == nil {
+			defer os.Remove(tempPDFPath)
+
+			pdfFile, err := os.Open(tempPDFPath)
 			if err == nil {
-				defer os.Remove(tempPDFPath)
+				defer pdfFile.Close()
 
-				pdfFile, err := os.Open(tempPDFPath)
+				pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
+				_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
 				if err == nil {
-					defer pdfFile.Close()
-
-					pdfObjectName = storage.GenerateDocumentPDFObjectName(documentID, template.Filename)
-					_, err = s.storageClient.UploadFile(ctx, pdfFile, pdfObjectName, "application/pdf")
-					if err == nil {
-						pdfGCSPath = pdfObjectName
-					}
+					pdfGCSPath = pdfObjectName
 				}
 			}
 		}
