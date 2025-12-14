@@ -1,26 +1,27 @@
 # DF-PLCH Makefile
 # DOCX Placeholder Processing Service
 
-.PHONY: help start build clean test lint
+.PHONY: help start build clean test lint deps watch status endpoints
 
 # Default target
 help:
 	@echo "DF-PLCH - DOCX Placeholder Processing Service"
 	@echo ""
-	@echo "Available commands:"
-	@echo "  make start   - Start server with Cloud SQL & GCS"
-	@echo "  make build   - Build the application"
-	@echo "  make clean   - Clean build artifacts"
-	@echo "  make test    - Run tests"
-	@echo "  make lint    - Run linter"
-	@echo "  make help    - Show this help message"
+	@echo "Local Development:"
+	@echo "  make start      - Start server locally"
+	@echo "  make build      - Build the application"
+	@echo "  make test       - Run tests"
+	@echo "  make lint       - Run linter"
+	@echo "  make clean      - Clean build artifacts"
+	@echo "  make deps       - Install dependencies"
+	@echo "  make watch      - Start with hot reload (requires air)"
+	@echo ""
+	@echo "Note: For Docker deployment, use parent Makefile (cd .. && make help)"
 
 # Start server
 start:
 	@echo "Starting DF-PLCH server..."
-	@echo "Features: Full document processing with Cloud SQL & GCS"
-	@echo "Database: Cloud SQL | GCS: Enabled"
-	@echo "Server will be available at http://localhost:8080"
+	@echo "Server will be available at http://localhost:8081"
 	@echo ""
 	cd cmd/server && go run .
 
@@ -63,7 +64,7 @@ watch:
 status:
 	@echo "DF-PLCH Service Status"
 	@echo "======================"
-	@curl -s http://localhost:8080/health | jq . 2>/dev/null || echo "Server not running or health endpoint unavailable"
+	@curl -s http://localhost:8081/health | jq . 2>/dev/null || echo "Server not running or health endpoint unavailable"
 
 # Show server endpoints
 endpoints:
