@@ -259,14 +259,81 @@ func (p *LibreOfficeProcessor) DetectOrientation() (bool, error) {
 }
 
 // ConvertToPDF converts a DOCX file to PDF using LibreOffice
-// This can replace Gotenberg for PDF conversion
+// Tries unoconvert (fast, if unoserver running) first, then falls back to direct LibreOffice
 func ConvertToPDF(inputDocx, outputPdf string) error {
+	// Try unoconvert first (much faster if unoserver is running)
+	if isUnoserverAvailable() {
+		err := convertWithUnoserver(inputDocx, outputPdf)
+		if err == nil {
+			return nil
+		}
+		fmt.Printf("[DEBUG] Unoserver conversion failed, falling back to direct LibreOffice: %v\n", err)
+	}
+
+	// Fall back to direct LibreOffice
 	loPath := FindLibreOffice()
 	if loPath == "" {
 		return fmt.Errorf("LibreOffice not found on system")
 	}
 
 	return ConvertToPDFWithPath(loPath, inputDocx, outputPdf)
+}
+
+// isUnoserverAvailable checks if unoconvert command is available
+func isUnoserverAvailable() bool {
+	_, err := exec.LookPath("unoconvert")
+	return err == nil
+}
+
+// convertWithUnoserver uses unoconvert for fast PDF conversion
+// Requires unoserver to be running: unoserver --daemon
+func convertWithUnoserver(inputDocx, outputPdf string) error {
+	absInputPath, err := filepath.Abs(inputDocx)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute input path: %w", err)
+	}
+
+	absOutputPath, err := filepath.Abs(outputPdf)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute output path: %w", err)
+	}
+
+	// Ensure output directory exists
+	if err := os.MkdirAll(filepath.Dir(absOutputPath), 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	cmd := exec.Command("unoconvert",
+		"--convert-to", "pdf",
+		absInputPath,
+		absOutputPath,
+	)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	// Set timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("unoconvert failed: %v, stderr: %s", err, stderr.String())
+		}
+	case <-time.After(30 * time.Second):
+		cmd.Process.Kill()
+		return fmt.Errorf("unoconvert timed out after 30 seconds")
+	}
+
+	// Verify output exists
+	if _, err := os.Stat(absOutputPath); os.IsNotExist(err) {
+		return fmt.Errorf("PDF output was not created")
+	}
+
+	return nil
 }
 
 // ConvertToPDFWithPath converts DOCX to PDF using specified LibreOffice path
