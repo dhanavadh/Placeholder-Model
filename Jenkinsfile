@@ -73,7 +73,7 @@ pipeline {
                             string(credentialsId: 'placeholder-db-name', variable: 'DB_NAME'),
                             string(credentialsId: 'placeholder-gotenberg-url', variable: 'GOTENBERG_URL'),
                             string(credentialsId: 'placeholder-google-ai-api-key', variable: 'GOOGLE_AI_API_KEY'),
-                            string(credentialsId: 'placeholder-google-vision-api-key', variable: 'GOOGLE_VISION_API_KEY')
+                            string(credentialsId: 'placeholder-typhoon-api-key', variable: 'TYPHOON_API_KEY')
                         ]) {
                             sh """
                                 ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_IP} 'mkdir -p ${REMOTE_DIR}/storage && cat > ${REMOTE_DIR}/.env << EOF
@@ -90,7 +90,8 @@ DB_NAME=${DB_NAME}
 GOTENBERG_URL=${GOTENBERG_URL}
 LIBREOFFICE_ENABLED=false
 GOOGLE_AI_API_KEY=${GOOGLE_AI_API_KEY}
-GOOGLE_VISION_API_KEY=${GOOGLE_VISION_API_KEY}
+TYPHOON_API_KEY=${TYPHOON_API_KEY}
+TYPHOON_API_URL=https://api.opentyphoon.ai/v1/ocr
 EOF'
                             """
                         }

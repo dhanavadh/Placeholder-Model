@@ -296,6 +296,12 @@ func main() {
 		v1.POST("/ocr/extract", ocrHandler.ExtractText)
 		v1.POST("/templates/:templateId/ocr", ocrHandler.ExtractForTemplate)
 
+		// Typhoon OCR endpoints (with form field mapping)
+		v1.POST("/ocr/typhoon", ocrHandler.ExtractWithTyphoon)
+		v1.POST("/ocr/smart", ocrHandler.SmartOCRExtract)
+		v1.POST("/ocr/map-fields", ocrHandler.GetFormFieldMappings)
+		v1.POST("/templates/:templateId/ocr/typhoon", ocrHandler.ExtractTyphoonForTemplate)
+
 		// Statistics endpoints
 		v1.GET("/stats", statisticsHandler.GetAll)
 		v1.GET("/stats/summary", statisticsHandler.GetSummary)
