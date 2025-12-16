@@ -2409,3 +2409,164 @@ func (s *OCRService) SuggestFieldTypes(placeholders []string, contexts []Placeho
 func (s *OCRService) SuggestFieldTypesFromPlaceholders(placeholders []string) (*FieldTypeSuggestionResult, error) {
 	return s.SuggestFieldTypes(placeholders, nil)
 }
+
+// DataTypeInfo represents a configurable data type for AI prompts
+type DataTypeInfo struct {
+	Code        string
+	Name        string
+	Description string
+	Pattern     string
+}
+
+// SuggestFieldTypesWithDataTypes suggests field types using configurable data types from database
+func (s *OCRService) SuggestFieldTypesWithDataTypes(placeholders []string, contexts []PlaceholderContext, dataTypes []DataTypeInfo) (*FieldTypeSuggestionResult, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	if len(placeholders) == 0 {
+		return &FieldTypeSuggestionResult{
+			Suggestions: []FieldTypeSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	fmt.Printf("[Typhoon FieldType] Inferring field types for %d placeholders with %d data types\n", len(placeholders), len(dataTypes))
+
+	// Build context descriptions if available
+	contextMap := make(map[string]string)
+	for _, ctx := range contexts {
+		contextMap[ctx.Placeholder] = ctx.FullContext
+	}
+
+	var placeholderDescriptions []string
+	for i, p := range placeholders {
+		desc := fmt.Sprintf("%d. %s", i+1, p)
+		if ctx, ok := contextMap[p]; ok && ctx != "" {
+			desc += fmt.Sprintf("\n   บริบท: \"%s\"", ctx)
+		}
+		placeholderDescriptions = append(placeholderDescriptions, desc)
+	}
+
+	// Build data type list dynamically
+	var dataTypeCodes []string
+	var dataTypeHints []string
+	for _, dt := range dataTypes {
+		dataTypeCodes = append(dataTypeCodes, dt.Code)
+		if dt.Pattern != "" && dt.Description != "" {
+			dataTypeHints = append(dataTypeHints, fmt.Sprintf("- ถ้าตรงกับ pattern %s → data_type = \"%s\" (%s)", dt.Pattern, dt.Code, dt.Description))
+		}
+	}
+
+	dataTypeList := strings.Join(dataTypeCodes, ", ")
+	hintsText := strings.Join(dataTypeHints, "\n")
+
+	prompt := fmt.Sprintf(`คุณเป็นผู้เชี่ยวชาญในการวิเคราะห์เอกสารและแบบฟอร์มภาษาไทย
+
+ฉันมี placeholders ในเอกสาร template ต่อไปนี้:
+%s
+
+กรุณาวิเคราะห์และแนะนำข้อมูลสำหรับแต่ละ placeholder:
+1. suggested_alias: ชื่อภาษาไทยที่เหมาะสม
+2. data_type: ประเภทข้อมูล (เลือกจาก: %s)
+3. input_type: ประเภท input (เลือกจาก: text, select, date, time, number, textarea, checkbox)
+4. entity: หมวดหมู่บุคคล (เลือกจาก: child, mother, father, informant, registrar, general)
+
+คำแนะนำ:
+- ถ้า placeholder มี prefix เช่น m_ หรือ mother_ → entity = "mother"
+- ถ้า placeholder มี prefix เช่น f_ หรือ father_ → entity = "father"
+- ถ้า placeholder มี prefix เช่น c_ หรือ child_ หรือ b_ หรือ baby_ → entity = "child"
+- ถ้า placeholder มี prefix เช่น inf_ หรือ informant_ → entity = "informant"
+- ถ้า placeholder มี prefix เช่น reg_ หรือ registrar_ → entity = "registrar"
+%s
+
+ตอบเป็น JSON format เท่านั้น:
+{
+  "suggestions": [
+    {
+      "placeholder": "{{placeholder_name}}",
+      "suggested_alias": "ชื่อภาษาไทย",
+      "data_type": "text",
+      "input_type": "text",
+      "entity": "general",
+      "confidence": 0.9,
+      "reasoning": "เหตุผลสั้นๆ"
+    }
+  ]
+}
+
+สำคัญ: ตอบเป็น JSON เท่านั้น`, strings.Join(placeholderDescriptions, "\n\n"), dataTypeList, hintsText)
+
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2.1-12b-instruct",
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.2,
+		"max_tokens":  4096,
+	}
+
+	jsonBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	apiURL := s.typhoonAPIURL
+	if apiURL == "" {
+		apiURL = "https://api.opentyphoon.ai/v1"
+	}
+
+	req, err := http.NewRequest("POST", apiURL+"/chat/completions", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API error: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon API")
+	}
+
+	content := chatResp.Choices[0].Message.Content
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var result FieldTypeSuggestionResult
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		fmt.Printf("[Typhoon FieldType] Failed to parse response: %s\n", content)
+		return nil, fmt.Errorf("failed to parse AI response: %w", err)
+	}
+
+	result.Model = "typhoon-v2.1-12b-instruct"
+	result.Provider = "typhoon"
+
+	return &result, nil
+}
