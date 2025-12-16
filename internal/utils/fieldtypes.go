@@ -10,22 +10,24 @@ import (
 type DataType string
 
 const (
-	DataTypeText       DataType = "text"
-	DataTypeIDNumber   DataType = "id_number"
-	DataTypeDate       DataType = "date"
-	DataTypeTime       DataType = "time"
-	DataTypeNumber     DataType = "number"
-	DataTypeAddress    DataType = "address"
-	DataTypeProvince   DataType = "province"
-	DataTypeCountry    DataType = "country"
-	DataTypeNamePrefix DataType = "name_prefix"
-	DataTypeName       DataType = "name"
-	DataTypeWeekday    DataType = "weekday"
-	DataTypePhone      DataType = "phone"
-	DataTypeEmail      DataType = "email"
-	DataTypeHouseCode  DataType = "house_code"
-	DataTypeZodiac     DataType = "zodiac"
-	DataTypeLunarMonth DataType = "lunar_month"
+	DataTypeText        DataType = "text"
+	DataTypeIDNumber    DataType = "id_number"
+	DataTypeDate        DataType = "date"
+	DataTypeTime        DataType = "time"
+	DataTypeNumber      DataType = "number"
+	DataTypeAddress     DataType = "address"
+	DataTypeProvince    DataType = "province"
+	DataTypeDistrict    DataType = "district"
+	DataTypeSubdistrict DataType = "subdistrict"
+	DataTypeCountry     DataType = "country"
+	DataTypeNamePrefix  DataType = "name_prefix"
+	DataTypeName        DataType = "name"
+	DataTypeWeekday     DataType = "weekday"
+	DataTypePhone       DataType = "phone"
+	DataTypeEmail       DataType = "email"
+	DataTypeHouseCode   DataType = "house_code"
+	DataTypeZodiac      DataType = "zodiac"
+	DataTypeLunarMonth  DataType = "lunar_month"
 )
 
 // Entity represents the entity type for a field
@@ -370,6 +372,21 @@ func DetectFieldType(placeholder string) FieldDefinition {
 		definition.DataType = DataTypeProvince
 		definition.InputType = InputTypeSelect
 		definition.Validation = &FieldValidation{Options: ProvinceOptions}
+		return definition
+	}
+
+	// Subdistrict patterns (check BEFORE district to handle sub_district)
+	if strings.Contains(lowerKey, "subdistrict") || strings.Contains(lowerKey, "sub_district") ||
+		strings.Contains(lowerKey, "sub-district") || strings.Contains(lowerKey, "tambon") {
+		definition.DataType = DataTypeSubdistrict
+		definition.InputType = InputTypeText
+		return definition
+	}
+
+	// District patterns (amphoe)
+	if strings.Contains(lowerKey, "district") || strings.Contains(lowerKey, "amphoe") {
+		definition.DataType = DataTypeDistrict
+		definition.InputType = InputTypeText
 		return definition
 	}
 

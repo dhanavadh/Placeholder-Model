@@ -2284,7 +2284,7 @@ func (s *OCRService) SuggestFieldTypes(placeholders []string, contexts []Placeho
 
 กรุณาวิเคราะห์และแนะนำข้อมูลสำหรับแต่ละ placeholder:
 1. suggested_alias: ชื่อภาษาไทยที่เหมาะสม
-2. data_type: ประเภทข้อมูล (เลือกจาก: text, id_number, date, time, number, address, province, country, name_prefix, name, weekday, phone, email, house_code, zodiac, lunar_month)
+2. data_type: ประเภทข้อมูล (เลือกจาก: text, id_number, date, time, number, address, province, district, subdistrict, country, name_prefix, name, weekday, phone, email, house_code, zodiac, lunar_month)
 3. input_type: ประเภท input (เลือกจาก: text, select, date, time, number, textarea, checkbox)
 4. entity: หมวดหมู่บุคคล (เลือกจาก: child, mother, father, informant, registrar, general)
 
@@ -2297,7 +2297,10 @@ func (s *OCRService) SuggestFieldTypes(placeholders []string, contexts []Placeho
 - ถ้ามี date หรือ วัน เดือน ปี → data_type = "date", input_type = "date"
 - ถ้ามี id หรือ บัตรประชาชน → data_type = "id_number"
 - ถ้ามี phone หรือ โทรศัพท์ → data_type = "phone"
-- ถ้ามี address หรือ ที่อยู่ → data_type = "address", input_type = "textarea"
+- ถ้ามี province หรือ จังหวัด → data_type = "province"
+- ถ้ามี subdistrict หรือ sub_district หรือ tambon หรือ ตำบล หรือ แขวง → data_type = "subdistrict"
+- ถ้ามี district หรือ amphoe หรือ อำเภอ หรือ เขต (แต่ไม่ใช่ subdistrict) → data_type = "district"
+- ถ้ามี address หรือ ที่อยู่ (และไม่มี district/subdistrict/province) → data_type = "address", input_type = "textarea"
 - ถ้ามี name หรือ ชื่อ → data_type = "name"
 - ถ้ามี prefix หรือ คำนำหน้า → data_type = "name_prefix", input_type = "select"
 

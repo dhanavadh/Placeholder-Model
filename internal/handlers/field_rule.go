@@ -250,6 +250,8 @@ func (h *FieldRuleHandler) GetDataTypes(c *gin.Context) {
 		{"value": "number", "label": "ตัวเลข"},
 		{"value": "address", "label": "ที่อยู่"},
 		{"value": "province", "label": "จังหวัด"},
+		{"value": "district", "label": "อำเภอ/เขต"},
+		{"value": "subdistrict", "label": "ตำบล/แขวง"},
 		{"value": "country", "label": "ประเทศ"},
 		{"value": "name_prefix", "label": "คำนำหน้าชื่อ"},
 		{"value": "name", "label": "ชื่อ"},
