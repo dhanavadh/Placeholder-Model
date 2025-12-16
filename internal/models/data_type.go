@@ -93,6 +93,8 @@ func DefaultDataTypes() []DataType {
 		{Code: "lunar_month", Name: "เดือนจันทรคติ", Description: "เดือนอ้าย ยี่ สาม...", Pattern: `(?i)(luna|^luna_m$)`, InputType: "select", Priority: 25, Validation: "{}", Options: lunarMonthOptions},
 		// Sex/Gender - matches sex, gender
 		{Code: "sex", Name: "เพศ", Description: "เพศ ชาย/หญิง", Pattern: `(?i)(^sex$|^gender$)`, InputType: "select", Priority: 40, Validation: "{}", Options: `["ชาย","หญิง"]`},
+		// Officer name - matches officer, registrar_name, issuer
+		{Code: "officer_name", Name: "ชื่อเจ้าหน้าที่", Description: "ชื่อเจ้าหน้าที่/นายทะเบียน", Pattern: `(?i)(officer|registrar_name|issuer|issued_by)`, InputType: "select", Priority: 55, Validation: "{}", Options: `[]`},
 	}
 }
 

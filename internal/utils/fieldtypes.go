@@ -28,6 +28,7 @@ const (
 	DataTypeHouseCode   DataType = "house_code"
 	DataTypeZodiac      DataType = "zodiac"
 	DataTypeLunarMonth  DataType = "lunar_month"
+	DataTypeOfficerName DataType = "officer_name"
 )
 
 // Entity represents the entity type for a field
