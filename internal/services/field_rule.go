@@ -258,16 +258,19 @@ func (s *FieldRuleService) ApplyRulesToPlaceholder(placeholder string, rules []m
 }
 
 // GenerateFieldDefinitionsWithRules generates field definitions using the configured rules
+// Order is set based on document position (first come first serve)
 func (s *FieldRuleService) GenerateFieldDefinitionsWithRules(placeholders []string) (map[string]utils.FieldDefinition, error) {
 	// First try to use Data Types with patterns (primary detection method)
 	var dataTypes []models.DataType
 	if err := internal.DB.Where("is_active = ?", true).Order("priority DESC").Find(&dataTypes).Error; err == nil && len(dataTypes) > 0 {
 		definitions := make(map[string]utils.FieldDefinition)
 
-		for _, placeholder := range placeholders {
+		for idx, placeholder := range placeholders {
 			key := strings.ReplaceAll(placeholder, "{{", "")
 			key = strings.ReplaceAll(key, "}}", "")
-			definitions[key] = s.ApplyDataTypesToPlaceholder(placeholder, dataTypes)
+			def := s.ApplyDataTypesToPlaceholder(placeholder, dataTypes)
+			def.Order = idx // Set order based on document position
+			definitions[key] = def
 		}
 
 		return definitions, nil
@@ -281,16 +284,19 @@ func (s *FieldRuleService) GenerateFieldDefinitionsWithRules(placeholders []stri
 
 	definitions := make(map[string]utils.FieldDefinition)
 
-	for _, placeholder := range placeholders {
+	for idx, placeholder := range placeholders {
 		key := strings.ReplaceAll(placeholder, "{{", "")
 		key = strings.ReplaceAll(key, "}}", "")
 
+		var def utils.FieldDefinition
 		// If no rules, fall back to the built-in detection
 		if len(rules) == 0 {
-			definitions[key] = utils.DetectFieldType(placeholder)
+			def = utils.DetectFieldType(placeholder)
 		} else {
-			definitions[key] = s.ApplyRulesToPlaceholder(placeholder, rules)
+			def = s.ApplyRulesToPlaceholder(placeholder, rules)
 		}
+		def.Order = idx // Set order based on document position
+		definitions[key] = def
 	}
 
 	return definitions, nil

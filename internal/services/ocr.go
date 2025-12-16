@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"regexp"
@@ -16,16 +17,20 @@ import (
 )
 
 type OCRService struct {
-	visionAPIKey  string
-	geminiAPIKey  string
-	addressAPIURL string
+	visionAPIKey   string
+	geminiAPIKey   string
+	addressAPIURL  string
+	typhoonAPIKey  string
+	typhoonAPIURL  string
 }
 
 func NewOCRService() *OCRService {
 	return &OCRService{
-		visionAPIKey:  os.Getenv("GOOGLE_VISION_API_KEY"),
-		geminiAPIKey:  os.Getenv("GOOGLE_AI_API_KEY"),
-		addressAPIURL: os.Getenv("ADDRESS_API_URL"),
+		visionAPIKey:   os.Getenv("GOOGLE_VISION_API_KEY"),
+		geminiAPIKey:   os.Getenv("GOOGLE_AI_API_KEY"),
+		addressAPIURL:  os.Getenv("ADDRESS_API_URL"),
+		typhoonAPIKey:  os.Getenv("TYPHOON_API_KEY"),
+		typhoonAPIURL:  os.Getenv("TYPHOON_API_URL"), // Default: https://api.opentyphoon.ai/v1/ocr
 	}
 }
 
@@ -685,4 +690,1719 @@ func (s *OCRService) EnhanceMappingsWithAddressAPI(mappings map[string]string, p
 	}
 
 	return mappings
+}
+
+// ============================================================================
+// Typhoon OCR Integration
+// ============================================================================
+
+// TyphoonOCRParams contains parameters for Typhoon OCR API
+type TyphoonOCRParams struct {
+	Model             string  `json:"model"`
+	TaskType          string  `json:"task_type"`
+	MaxTokens         int     `json:"max_tokens"`
+	Temperature       float64 `json:"temperature"`
+	TopP              float64 `json:"top_p"`
+	RepetitionPenalty float64 `json:"repetition_penalty"`
+}
+
+// TyphoonOCRResponse represents the response from Typhoon OCR API
+type TyphoonOCRResponse struct {
+	TotalPages       int `json:"total_pages"`
+	SuccessfulPages  int `json:"successful_pages"`
+	FailedPages      int `json:"failed_pages"`
+	ProcessingTime   float64 `json:"processing_time"`
+	Results          []TyphoonResultItem `json:"results"`
+}
+
+// TyphoonResultItem represents a single result item from Typhoon OCR
+type TyphoonResultItem struct {
+	Filename string `json:"filename"`
+	Success  bool   `json:"success"`
+	Message  struct {
+		ID      string `json:"id"`
+		Created int64  `json:"created"`
+		Model   string `json:"model"`
+		Object  string `json:"object"`
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Index        int    `json:"index"`
+			Message      struct {
+				Content string `json:"content"`
+				Role    string `json:"role"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+	Error    *string `json:"error"`
+	FileType string  `json:"file_type"`
+	FileSize int     `json:"file_size"`
+	Duration float64 `json:"duration"`
+}
+
+// TyphoonExtractedData contains structured data extracted from Thai documents
+type TyphoonExtractedData struct {
+	// Personal Information
+	IDNumber      string `json:"id_number"`
+	IDValid       bool   `json:"id_valid"`
+	NamePrefixTH  string `json:"name_prefix_th"`
+	FirstNameTH   string `json:"first_name_th"`
+	LastNameTH    string `json:"last_name_th"`
+	FullNameTH    string `json:"full_name_th"`
+	NamePrefixEN  string `json:"name_prefix_en"`
+	FirstNameEN   string `json:"first_name_en"`
+	LastNameEN    string `json:"last_name_en"`
+	FullNameEN    string `json:"full_name_en"`
+
+	// Dates
+	BirthDate      string `json:"birth_date"`
+	BirthDateTH    string `json:"birth_date_th"`
+	IssueDate      string `json:"issue_date"`
+	IssueDateTH    string `json:"issue_date_th"`
+	ExpiryDate     string `json:"expiry_date"`
+	ExpiryDateTH   string `json:"expiry_date_th"`
+
+	// Address
+	Address        string `json:"address"`
+	HouseNo        string `json:"house_no"`
+	Moo            string `json:"moo"`
+	Soi            string `json:"soi"`
+	Road           string `json:"road"`
+	Subdistrict    string `json:"subdistrict"`
+	SubdistrictEN  string `json:"subdistrict_en"`
+	District       string `json:"district"`
+	DistrictEN     string `json:"district_en"`
+	Province       string `json:"province"`
+	ProvinceEN     string `json:"province_en"`
+	PostalCode     string `json:"postal_code"`
+
+	// Additional Information
+	Religion       string `json:"religion"`
+	Nationality    string `json:"nationality"`
+	Gender         string `json:"gender"`
+	BloodType      string `json:"blood_type"`
+	Phone          string `json:"phone"`
+	Email          string `json:"email"`
+
+	// Document specific
+	DocumentType   string `json:"document_type"`
+	DocumentNumber string `json:"document_number"`
+
+	// Raw data for unmapped fields
+	RawFields      map[string]string `json:"raw_fields,omitempty"`
+}
+
+// TyphoonOCRResult combines raw text with structured extraction
+type TyphoonOCRResult struct {
+	RawText        string                `json:"raw_text"`
+	ExtractedData  *TyphoonExtractedData `json:"extracted_data"`
+	MappedFields   map[string]string     `json:"mapped_fields,omitempty"`
+	DetectionScore int                   `json:"detection_score"`
+	Provider       string                `json:"provider"` // "typhoon" or "vision"
+}
+
+// DefaultTyphoonParams returns default parameters for Typhoon OCR
+func DefaultTyphoonParams() TyphoonOCRParams {
+	return TyphoonOCRParams{
+		Model:             "typhoon-ocr",
+		TaskType:          "default",
+		MaxTokens:         16384,
+		Temperature:       0.1,
+		TopP:              0.6,
+		RepetitionPenalty: 1.2,
+	}
+}
+
+// ExtractWithTyphoon calls Typhoon OCR API to extract text from image
+func (s *OCRService) ExtractWithTyphoon(imageData []byte, params *TyphoonOCRParams) (*TyphoonOCRResult, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	apiURL := s.typhoonAPIURL
+	if apiURL == "" {
+		apiURL = "https://api.opentyphoon.ai/v1/ocr"
+	}
+
+	// Use default params if not provided
+	if params == nil {
+		defaultParams := DefaultTyphoonParams()
+		params = &defaultParams
+	}
+
+	// Create multipart form
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// Add image file
+	part, err := writer.CreateFormFile("file", "image.jpg")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := part.Write(imageData); err != nil {
+		return nil, fmt.Errorf("failed to write image data: %w", err)
+	}
+
+	// Add parameters
+	writer.WriteField("model", params.Model)
+	writer.WriteField("task_type", params.TaskType)
+	writer.WriteField("max_tokens", strconv.Itoa(params.MaxTokens))
+	writer.WriteField("temperature", strconv.FormatFloat(params.Temperature, 'f', -1, 64))
+	writer.WriteField("top_p", strconv.FormatFloat(params.TopP, 'f', -1, 64))
+	writer.WriteField("repetition_penalty", strconv.FormatFloat(params.RepetitionPenalty, 'f', -1, 64))
+
+	writer.Close()
+
+	// Create request
+	req, err := http.NewRequest("POST", apiURL, &buf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	// Execute request
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Typhoon API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Debug: log raw response
+	fmt.Printf("[Typhoon] Raw API response: %s\n", string(body))
+
+	// Parse response
+	var typhoonResp TyphoonOCRResponse
+	if err := json.Unmarshal(body, &typhoonResp); err != nil {
+		return nil, fmt.Errorf("failed to parse Typhoon response: %w, body: %s", err, string(body))
+	}
+
+	// Debug: log parsed results
+	fmt.Printf("[Typhoon] Parsed %d results, successful: %d\n", len(typhoonResp.Results), typhoonResp.SuccessfulPages)
+
+	// Combine all page results - extract from nested message.choices[].message.content
+	var rawText strings.Builder
+	for i, result := range typhoonResp.Results {
+		if !result.Success {
+			fmt.Printf("[Typhoon] Result %d failed: %v\n", i, result.Error)
+			continue
+		}
+
+		// Extract content from choices
+		for _, choice := range result.Message.Choices {
+			content := choice.Message.Content
+			fmt.Printf("[Typhoon] Result %d, choice %d content length: %d\n", i, choice.Index, len(content))
+			if content != "" {
+				rawText.WriteString(content)
+				rawText.WriteString("\n")
+			}
+		}
+	}
+
+	fmt.Printf("[Typhoon] Total extracted text length: %d\n", rawText.Len())
+
+	// Parse and structure the extracted text
+	extractedData := s.parseTyphoonText(rawText.String())
+
+	// Calculate detection score
+	score := s.calculateDetectionScore(extractedData)
+
+	return &TyphoonOCRResult{
+		RawText:        rawText.String(),
+		ExtractedData:  extractedData,
+		DetectionScore: score,
+		Provider:       "typhoon",
+	}, nil
+}
+
+// ExtractWithTyphoonBase64 extracts text from base64 encoded image using Typhoon OCR
+func (s *OCRService) ExtractWithTyphoonBase64(imageBase64 string, params *TyphoonOCRParams) (*TyphoonOCRResult, error) {
+	// Remove data URL prefix if present
+	if strings.HasPrefix(imageBase64, "data:image") {
+		parts := strings.SplitN(imageBase64, ",", 2)
+		if len(parts) == 2 {
+			imageBase64 = parts[1]
+		}
+	}
+
+	imageData, err := base64.StdEncoding.DecodeString(imageBase64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 image: %w", err)
+	}
+
+	return s.ExtractWithTyphoon(imageData, params)
+}
+
+// parseTyphoonText parses OCR text from Typhoon and extracts structured data
+func (s *OCRService) parseTyphoonText(rawText string) *TyphoonExtractedData {
+	data := &TyphoonExtractedData{
+		RawFields: make(map[string]string),
+	}
+
+	// Normalize Thai digits
+	normalizedText := normalizeThaiDigits(rawText)
+
+	// Extract Thai ID number (13 digits)
+	idPattern := regexp.MustCompile(`\b(\d{1}[\s-]?\d{4}[\s-]?\d{5}[\s-]?\d{2}[\s-]?\d{1}|\d{13})\b`)
+	if match := idPattern.FindString(normalizedText); match != "" {
+		cleanID := regexp.MustCompile(`\D`).ReplaceAllString(match, "")
+		data.IDNumber = cleanID
+		data.IDValid = validateThaiID(cleanID)
+	}
+
+	// Extract Thai name with prefix
+	thaiPrefixPatterns := []struct {
+		prefix   string
+		prefixEN string
+	}{
+		{"นาย", "Mr."},
+		{"นาง", "Mrs."},
+		{"นางสาว", "Miss"},
+		{"เด็กชาย", "Master"},
+		{"เด็กหญิง", "Miss"},
+		{"ด.ช.", "Master"},
+		{"ด.ญ.", "Miss"},
+	}
+
+	for _, p := range thaiPrefixPatterns {
+		pattern := regexp.MustCompile(p.prefix + `\s*([ก-๏]+)\s+([ก-๏]+)`)
+		if match := pattern.FindStringSubmatch(rawText); match != nil {
+			data.NamePrefixTH = p.prefix
+			data.NamePrefixEN = p.prefixEN
+			data.FirstNameTH = strings.TrimSpace(match[1])
+			data.LastNameTH = strings.TrimSpace(match[2])
+			data.FullNameTH = p.prefix + " " + data.FirstNameTH + " " + data.LastNameTH
+			break
+		}
+	}
+
+	// Extract English name
+	engNamePatterns := []struct {
+		pattern *regexp.Regexp
+	}{
+		{regexp.MustCompile(`(?i)(Mr\.|Mrs\.|Miss|Ms\.)\s*([A-Za-z]+)\s+([A-Za-z]+)`)},
+		{regexp.MustCompile(`(?i)Name\s*:?\s*(Mr\.|Mrs\.|Miss|Ms\.)?\s*([A-Za-z]+)\s+([A-Za-z]+)`)},
+		{regexp.MustCompile(`(?i)([A-Z][a-z]+)\s+([A-Z][a-z]+)`)}, // Simple capitalized names
+	}
+
+	for _, p := range engNamePatterns {
+		if match := p.pattern.FindStringSubmatch(rawText); match != nil {
+			if len(match) == 4 {
+				data.NamePrefixEN = match[1]
+				data.FirstNameEN = match[2]
+				data.LastNameEN = match[3]
+			} else if len(match) == 3 {
+				data.FirstNameEN = match[1]
+				data.LastNameEN = match[2]
+			}
+			if data.FirstNameEN != "" && data.LastNameEN != "" {
+				prefix := data.NamePrefixEN
+				if prefix == "" {
+					prefix = ""
+				} else {
+					prefix = prefix + " "
+				}
+				data.FullNameEN = strings.TrimSpace(prefix + data.FirstNameEN + " " + data.LastNameEN)
+				break
+			}
+		}
+	}
+
+	// Extract dates
+	datePattern := regexp.MustCompile(`(\d{1,2})\s+([ก-๏\.]+)\s+(\d{4})`)
+	dates := datePattern.FindAllStringSubmatch(rawText, -1)
+	dateLabels := []string{"birth", "issue", "expiry"}
+
+	for i, match := range dates {
+		if i >= len(dateLabels) {
+			break
+		}
+		thaiDate := match[0]
+		gregorianDate := convertThaiDate(thaiDate)
+
+		switch dateLabels[i] {
+		case "birth":
+			data.BirthDateTH = thaiDate
+			data.BirthDate = gregorianDate
+		case "issue":
+			data.IssueDateTH = thaiDate
+			data.IssueDate = gregorianDate
+		case "expiry":
+			data.ExpiryDateTH = thaiDate
+			data.ExpiryDate = gregorianDate
+		}
+	}
+
+	// Extract address components
+	s.extractAddressComponents(rawText, data)
+
+	// Extract phone number
+	phonePattern := regexp.MustCompile(`(?:โทร|Tel|Phone|เบอร์)[\s.:]*(\d{2,3}[-\s]?\d{3}[-\s]?\d{4})`)
+	if match := phonePattern.FindStringSubmatch(normalizedText); match != nil {
+		data.Phone = regexp.MustCompile(`\D`).ReplaceAllString(match[1], "")
+	}
+
+	// Extract email
+	emailPattern := regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
+	if match := emailPattern.FindString(rawText); match != "" {
+		data.Email = match
+	}
+
+	// Extract religion
+	religionPattern := regexp.MustCompile(`ศาสนา\s*([ก-๏]+)`)
+	if match := religionPattern.FindStringSubmatch(rawText); match != nil {
+		data.Religion = match[1]
+	}
+
+	// Detect document type
+	data.DocumentType = s.detectDocumentType(rawText)
+
+	return data
+}
+
+// extractAddressComponents extracts address parts from Thai text
+func (s *OCRService) extractAddressComponents(text string, data *TyphoonExtractedData) {
+	// House number
+	housePattern := regexp.MustCompile(`(?:บ้านเลขที่|เลขที่)\s*(\d+[/\d]*)`)
+	if match := housePattern.FindStringSubmatch(text); match != nil {
+		data.HouseNo = match[1]
+	}
+
+	// Moo (village number)
+	mooPattern := regexp.MustCompile(`(?:หมู่|ม\.)\s*(\d+)`)
+	if match := mooPattern.FindStringSubmatch(text); match != nil {
+		data.Moo = match[1]
+	}
+
+	// Soi
+	soiPattern := regexp.MustCompile(`(?:ซอย|ซ\.)\s*([ก-๏\w\d]+)`)
+	if match := soiPattern.FindStringSubmatch(text); match != nil {
+		data.Soi = match[1]
+	}
+
+	// Road
+	roadPattern := regexp.MustCompile(`(?:ถนน|ถ\.)\s*([ก-๏]+)`)
+	if match := roadPattern.FindStringSubmatch(text); match != nil {
+		data.Road = match[1]
+	}
+
+	// Subdistrict
+	subdistrictPattern := regexp.MustCompile(`(?:ตำบล|ต\.|แขวง)\s*([ก-๏]+)`)
+	if match := subdistrictPattern.FindStringSubmatch(text); match != nil {
+		data.Subdistrict = match[1]
+	}
+
+	// District
+	districtPattern := regexp.MustCompile(`(?:อำเภอ|อ\.|เขต)\s*([ก-๏]+)`)
+	if match := districtPattern.FindStringSubmatch(text); match != nil {
+		data.District = match[1]
+	}
+
+	// Province
+	provincePattern := regexp.MustCompile(`(?:จังหวัด|จ\.)\s*([ก-๏]+)`)
+	if match := provincePattern.FindStringSubmatch(text); match != nil {
+		data.Province = match[1]
+	}
+
+	// Postal code
+	postalPattern := regexp.MustCompile(`\b(\d{5})\b`)
+	if match := postalPattern.FindStringSubmatch(text); match != nil {
+		data.PostalCode = match[1]
+	}
+
+	// Build full address
+	var addressParts []string
+	if data.HouseNo != "" {
+		addressParts = append(addressParts, "บ้านเลขที่ "+data.HouseNo)
+	}
+	if data.Moo != "" {
+		addressParts = append(addressParts, "หมู่ "+data.Moo)
+	}
+	if data.Soi != "" {
+		addressParts = append(addressParts, "ซอย "+data.Soi)
+	}
+	if data.Road != "" {
+		addressParts = append(addressParts, "ถนน "+data.Road)
+	}
+	if data.Subdistrict != "" {
+		addressParts = append(addressParts, "ตำบล "+data.Subdistrict)
+	}
+	if data.District != "" {
+		addressParts = append(addressParts, "อำเภอ "+data.District)
+	}
+	if data.Province != "" {
+		addressParts = append(addressParts, "จังหวัด "+data.Province)
+	}
+	if data.PostalCode != "" {
+		addressParts = append(addressParts, data.PostalCode)
+	}
+
+	if len(addressParts) > 0 {
+		data.Address = strings.Join(addressParts, " ")
+	}
+}
+
+// detectDocumentType detects the type of Thai document from OCR text
+func (s *OCRService) detectDocumentType(text string) string {
+	text = strings.ToLower(text)
+
+	if strings.Contains(text, "บัตรประจำตัวประชาชน") || strings.Contains(text, "identification card") {
+		return "thai_id_card"
+	}
+	if strings.Contains(text, "หนังสือเดินทาง") || strings.Contains(text, "passport") {
+		return "passport"
+	}
+	if strings.Contains(text, "สูติบัตร") || strings.Contains(text, "birth certificate") {
+		return "birth_certificate"
+	}
+	if strings.Contains(text, "ทะเบียนบ้าน") || strings.Contains(text, "house registration") {
+		return "house_registration"
+	}
+	if strings.Contains(text, "ใบขับขี่") || strings.Contains(text, "driver") {
+		return "driver_license"
+	}
+	if strings.Contains(text, "ใบเสร็จ") || strings.Contains(text, "receipt") {
+		return "receipt"
+	}
+	if strings.Contains(text, "ใบกำกับภาษี") || strings.Contains(text, "invoice") || strings.Contains(text, "tax invoice") {
+		return "invoice"
+	}
+
+	return "unknown"
+}
+
+// calculateDetectionScore calculates confidence score based on extracted data
+func (s *OCRService) calculateDetectionScore(data *TyphoonExtractedData) int {
+	score := 0
+
+	if data.IDNumber != "" {
+		score += 25
+		if data.IDValid {
+			score += 10
+		}
+	}
+	if data.FirstNameTH != "" || data.FirstNameEN != "" {
+		score += 15
+	}
+	if data.LastNameTH != "" || data.LastNameEN != "" {
+		score += 10
+	}
+	if data.BirthDate != "" {
+		score += 10
+	}
+	if data.Address != "" || data.Province != "" {
+		score += 10
+	}
+	if data.Phone != "" {
+		score += 5
+	}
+	if data.Email != "" {
+		score += 5
+	}
+	if data.DocumentType != "unknown" {
+		score += 10
+	}
+
+	return score
+}
+
+// ============================================================================
+// Form Field Mapping
+// ============================================================================
+
+// FormFieldMapping maps extracted OCR data to form input fields
+type FormFieldMapping struct {
+	FieldName    string `json:"field_name"`    // Form field name/placeholder
+	Value        string `json:"value"`         // Extracted value
+	Confidence   int    `json:"confidence"`    // Confidence score (0-100)
+	Source       string `json:"source"`        // Source field from OCR extraction
+	InputType    string `json:"input_type"`    // Suggested input type (text, select, date, etc.)
+	NeedsReview  bool   `json:"needs_review"`  // Whether the field needs human review
+}
+
+// MapTyphoonToFormFields maps Typhoon OCR extracted data to template form fields
+func (s *OCRService) MapTyphoonToFormFields(result *TyphoonOCRResult, placeholders []string) map[string]FormFieldMapping {
+	mappings := make(map[string]FormFieldMapping)
+
+	if result == nil || result.ExtractedData == nil {
+		return mappings
+	}
+
+	data := result.ExtractedData
+
+	// Build a lookup map from extracted data
+	extractedMap := map[string]struct {
+		value      string
+		confidence int
+		inputType  string
+	}{
+		// ID fields
+		"id_number":      {data.IDNumber, s.boolToConfidence(data.IDValid, 95, 70), "text"},
+		"id":             {data.IDNumber, s.boolToConfidence(data.IDValid, 95, 70), "text"},
+
+		// Thai name fields
+		"name_prefix":    {data.NamePrefixTH, 90, "select"},
+		"name_prefix_th": {data.NamePrefixTH, 90, "select"},
+		"first_name":     {data.FirstNameTH, 85, "text"},
+		"first_name_th":  {data.FirstNameTH, 85, "text"},
+		"last_name":      {data.LastNameTH, 85, "text"},
+		"last_name_th":   {data.LastNameTH, 85, "text"},
+		"full_name":      {data.FullNameTH, 85, "text"},
+		"full_name_th":   {data.FullNameTH, 85, "text"},
+		"name_th":        {data.FullNameTH, 85, "text"},
+
+		// English name fields
+		"name_prefix_en": {data.NamePrefixEN, 90, "select"},
+		"first_name_en":  {data.FirstNameEN, 80, "text"},
+		"last_name_en":   {data.LastNameEN, 80, "text"},
+		"full_name_en":   {data.FullNameEN, 80, "text"},
+		"name_en":        {data.FullNameEN, 80, "text"},
+
+		// Date fields
+		"dob":            {data.BirthDate, 85, "date"},
+		"birth_date":     {data.BirthDate, 85, "date"},
+		"date_of_birth":  {data.BirthDate, 85, "date"},
+		"birth_date_th":  {data.BirthDateTH, 85, "text"},
+		"issue_date":     {data.IssueDate, 80, "date"},
+		"issue_date_th":  {data.IssueDateTH, 80, "text"},
+		"expiry_date":    {data.ExpiryDate, 80, "date"},
+		"expiry_date_th": {data.ExpiryDateTH, 80, "text"},
+
+		// Address fields
+		"address":        {data.Address, 75, "textarea"},
+		"house_no":       {data.HouseNo, 80, "text"},
+		"house_number":   {data.HouseNo, 80, "text"},
+		"moo":            {data.Moo, 80, "text"},
+		"village":        {data.Moo, 80, "text"},
+		"soi":            {data.Soi, 75, "text"},
+		"road":           {data.Road, 75, "text"},
+		"subdistrict":    {data.Subdistrict, 80, "text"},
+		"tambon":         {data.Subdistrict, 80, "text"},
+		"subdistrict_en": {data.SubdistrictEN, 75, "text"},
+		"district":       {data.District, 80, "text"},
+		"amphoe":         {data.District, 80, "text"},
+		"district_en":    {data.DistrictEN, 75, "text"},
+		"province":       {data.Province, 85, "select"},
+		"province_th":    {data.Province, 85, "select"},
+		"province_en":    {data.ProvinceEN, 80, "text"},
+		"postal_code":    {data.PostalCode, 90, "text"},
+		"zip_code":       {data.PostalCode, 90, "text"},
+
+		// Other fields
+		"religion":       {data.Religion, 80, "text"},
+		"nationality":    {data.Nationality, 80, "text"},
+		"gender":         {data.Gender, 85, "select"},
+		"phone":          {data.Phone, 85, "text"},
+		"telephone":      {data.Phone, 85, "text"},
+		"tel":            {data.Phone, 85, "text"},
+		"email":          {data.Email, 90, "text"},
+	}
+
+	// Match placeholders to extracted data
+	for _, placeholder := range placeholders {
+		cleanPlaceholder := strings.ReplaceAll(placeholder, "{{", "")
+		cleanPlaceholder = strings.ReplaceAll(cleanPlaceholder, "}}", "")
+		cleanPlaceholder = strings.TrimSpace(cleanPlaceholder)
+		lowerPlaceholder := strings.ToLower(cleanPlaceholder)
+
+		// Remove entity prefixes for matching (m_, f_, b_, r_, etc.)
+		matchKey := lowerPlaceholder
+		for _, prefix := range []string{"m_", "f_", "b_", "r_", "c_"} {
+			if strings.HasPrefix(lowerPlaceholder, prefix) {
+				matchKey = strings.TrimPrefix(lowerPlaceholder, prefix)
+				break
+			}
+		}
+
+		// Direct match
+		if extracted, ok := extractedMap[matchKey]; ok && extracted.value != "" {
+			mappings[cleanPlaceholder] = FormFieldMapping{
+				FieldName:   cleanPlaceholder,
+				Value:       extracted.value,
+				Confidence:  extracted.confidence,
+				Source:      matchKey,
+				InputType:   extracted.inputType,
+				NeedsReview: extracted.confidence < 80,
+			}
+			continue
+		}
+
+		// Fuzzy match - check if placeholder contains any key
+		for key, extracted := range extractedMap {
+			if extracted.value == "" {
+				continue
+			}
+			if strings.Contains(matchKey, key) || strings.Contains(key, matchKey) {
+				mappings[cleanPlaceholder] = FormFieldMapping{
+					FieldName:   cleanPlaceholder,
+					Value:       extracted.value,
+					Confidence:  extracted.confidence - 10, // Lower confidence for fuzzy match
+					Source:      key,
+					InputType:   extracted.inputType,
+					NeedsReview: true,
+				}
+				break
+			}
+		}
+	}
+
+	return mappings
+}
+
+// MapTyphoonToPlaceholders converts form field mappings to simple placeholder->value map
+func (s *OCRService) MapTyphoonToPlaceholders(result *TyphoonOCRResult, placeholders []string) map[string]string {
+	fieldMappings := s.MapTyphoonToFormFields(result, placeholders)
+
+	mappings := make(map[string]string)
+	for placeholder, fieldMapping := range fieldMappings {
+		if fieldMapping.Value != "" {
+			mappings[placeholder] = fieldMapping.Value
+		}
+	}
+
+	return mappings
+}
+
+// boolToConfidence converts a boolean validation result to confidence score
+func (s *OCRService) boolToConfidence(valid bool, highScore, lowScore int) int {
+	if valid {
+		return highScore
+	}
+	return lowScore
+}
+
+// ExtractWithTyphoonAndMap performs OCR and maps results to form fields in one call
+func (s *OCRService) ExtractWithTyphoonAndMap(imageData []byte, placeholders []string, params *TyphoonOCRParams) (*TyphoonOCRResult, error) {
+	result, err := s.ExtractWithTyphoon(imageData, params)
+	if err != nil {
+		return nil, err
+	}
+
+	// Map to placeholders
+	result.MappedFields = s.MapTyphoonToPlaceholders(result, placeholders)
+
+	// Enhance with Gemini AI if available
+	if s.geminiAPIKey != "" && len(placeholders) > 0 {
+		aiMappings, err := s.mapWithGemini(nil, placeholders, result.RawText)
+		if err == nil {
+			// Merge AI mappings with rule-based mappings (AI takes precedence)
+			for key, value := range aiMappings {
+				if value != "" {
+					result.MappedFields[key] = value
+				}
+			}
+		}
+	}
+
+	// Enhance with address API if available
+	if s.addressAPIURL != "" {
+		result.MappedFields = s.EnhanceMappingsWithAddressAPI(result.MappedFields, placeholders)
+	}
+
+	return result, nil
+}
+
+// mapWithTyphoonChat uses Typhoon's chat API for intelligent field mapping (replaces Gemini)
+func (s *OCRService) mapWithTyphoonChat(ocrRawText string, placeholders []string) (map[string]string, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	if ocrRawText == "" {
+		return nil, fmt.Errorf("no raw text provided for mapping")
+	}
+
+	fmt.Printf("[Typhoon Chat] Starting mapping with %d placeholders\n", len(placeholders))
+	fmt.Printf("[Typhoon Chat] Raw text length: %d characters\n", len(ocrRawText))
+
+	// Clean placeholders for the prompt
+	var cleanPlaceholders []string
+	for _, p := range placeholders {
+		clean := strings.ReplaceAll(p, "{{", "")
+		clean = strings.ReplaceAll(clean, "}}", "")
+		cleanPlaceholders = append(cleanPlaceholders, clean)
+	}
+
+	// Build prompt for Typhoon Chat
+	prompt := fmt.Sprintf(`You are an expert at extracting data from Thai documents (like Thai ID cards, birth certificates, government forms).
+
+I scanned a Thai document and got this OCR text:
+---
+%s
+---
+
+I need to fill a form with these field names:
+%s
+
+Your task:
+1. Extract ALL relevant information from the OCR text
+2. TRANSLATE ALL Thai text to English (romanization/transliteration)
+3. Convert Thai name prefixes: นาย→Mr., นาง→Mrs., นางสาว→Miss, เด็กชาย→Master, เด็กหญิง→Miss
+4. Convert Buddhist Era years to Gregorian: subtract 543 (e.g., 2567→2024)
+5. Format dates as YYYY-MM-DD
+6. Match extracted data to the most appropriate field names
+
+For Thai addresses - TRANSLATE to English:
+- Province (จังหวัด): e.g., กรุงเทพมหานคร→Bangkok, เชียงใหม่→Chiang Mai
+- District (อำเภอ/เขต): transliterate to English
+- Subdistrict (ตำบล/แขวง): transliterate to English
+
+Return ONLY a JSON object. Map field names to their values.
+Example: {"first_name": "Somchai", "last_name": "Jaidee", "name_prefix": "Mr.", "id_number": "1234567890123", "dob": "1990-01-15"}
+
+Important:
+- Use the EXACT field names from my list
+- TRANSLATE everything to English
+- Return valid JSON only, no explanation`, ocrRawText, strings.Join(cleanPlaceholders, ", "))
+
+	// Build Typhoon Chat API request
+	// Available models: typhoon-v2.1-12b-instruct, typhoon-v2.5-30b-a3b-instruct
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2.1-12b-instruct",
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+		"max_tokens":   2048,
+		"temperature":  0.1,
+		"top_p":        0.9,
+	}
+
+	reqBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal Typhoon Chat request: %w", err)
+	}
+
+	// Call Typhoon Chat API
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 60 * time.Second}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon Chat API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read Typhoon Chat response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Typhoon Chat API error: %s", string(body))
+	}
+
+	// Parse response (OpenAI-compatible format)
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return nil, fmt.Errorf("failed to parse Typhoon Chat response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon Chat")
+	}
+
+	// Parse the JSON response
+	responseText := chatResp.Choices[0].Message.Content
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	fmt.Printf("[Typhoon Chat] Response: %s\n", responseText)
+
+	mappings := make(map[string]string)
+	if err := json.Unmarshal([]byte(responseText), &mappings); err != nil {
+		return nil, fmt.Errorf("failed to parse Typhoon Chat JSON response: %w, response: %s", err, responseText)
+	}
+
+	fmt.Printf("[Typhoon Chat] Extracted %d field mappings\n", len(mappings))
+	return mappings, nil
+}
+
+// ExtractWithTyphoonVision uses Typhoon Vision model to do OCR + structured extraction in ONE call
+// This is more cost-effective than separate OCR + Chat calls
+func (s *OCRService) ExtractWithTyphoonVision(imageBase64 string, placeholders []string) (*TyphoonOCRResult, map[string]FormFieldMapping, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	fmt.Printf("[Typhoon Vision] Single-call extraction with %d placeholders\n", len(placeholders))
+
+	// Clean placeholders
+	var cleanPlaceholders []string
+	for _, p := range placeholders {
+		clean := strings.ReplaceAll(p, "{{", "")
+		clean = strings.ReplaceAll(clean, "}}", "")
+		cleanPlaceholders = append(cleanPlaceholders, clean)
+	}
+
+	// Build prompt for structured extraction
+	prompt := fmt.Sprintf(`Extract ALL text from this Thai document image and map to these form fields: %s
+
+Instructions:
+1. Extract all visible text from the document
+2. Identify document type (thai_id_card, passport, birth_certificate, etc.)
+3. Map extracted data to the field names provided
+4. TRANSLATE all Thai text to English
+5. Convert Thai name prefixes: นาย→Mr., นาง→Mrs., นางสาว→Miss
+6. Convert Buddhist Era years to Gregorian (subtract 543)
+7. Format dates as YYYY-MM-DD
+
+Return JSON format:
+{
+  "raw_text": "all extracted text here",
+  "document_type": "thai_id_card",
+  "mapped_fields": {
+    "field_name": "extracted_value_in_english",
+    ...
+  }
+}
+
+IMPORTANT: Return ONLY valid JSON, no explanation.`, strings.Join(cleanPlaceholders, ", "))
+
+	// Build request with image
+	imageData := imageBase64
+	if strings.HasPrefix(imageData, "data:image") {
+		parts := strings.SplitN(imageData, ",", 2)
+		if len(parts) == 2 {
+			imageData = parts[1]
+		}
+	}
+
+	// Use Typhoon Vision API (chat completions with image)
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2-72b-vision-instruct",
+		"messages": []map[string]interface{}{
+			{
+				"role": "user",
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": prompt,
+					},
+					{
+						"type": "image_url",
+						"image_url": map[string]string{
+							"url": "data:image/jpeg;base64," + imageData,
+						},
+					},
+				},
+			},
+		},
+		"max_tokens":  4096,
+		"temperature": 0.1,
+	}
+
+	reqBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Call Typhoon Vision API
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 120 * time.Second}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to call Typhoon Vision API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	fmt.Printf("[Typhoon Vision] Response status: %d\n", resp.StatusCode)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("Typhoon Vision API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, nil, fmt.Errorf("no response from Typhoon Vision")
+	}
+
+	// Parse the JSON response
+	responseText := chatResp.Choices[0].Message.Content
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	fmt.Printf("[Typhoon Vision] Response: %s\n", responseText)
+
+	// Parse structured response
+	var structuredResp struct {
+		RawText      string            `json:"raw_text"`
+		DocumentType string            `json:"document_type"`
+		MappedFields map[string]string `json:"mapped_fields"`
+	}
+
+	if err := json.Unmarshal([]byte(responseText), &structuredResp); err != nil {
+		// If JSON parsing fails, try to extract what we can
+		fmt.Printf("[Typhoon Vision] JSON parse failed, using raw response: %v\n", err)
+		structuredResp.RawText = responseText
+		structuredResp.MappedFields = make(map[string]string)
+	}
+
+	// Build result
+	result := &TyphoonOCRResult{
+		RawText:        structuredResp.RawText,
+		ExtractedData:  s.parseTyphoonText(structuredResp.RawText),
+		MappedFields:   structuredResp.MappedFields,
+		DetectionScore: 85,
+		Provider:       "typhoon-vision",
+	}
+
+	if structuredResp.DocumentType != "" {
+		result.ExtractedData.DocumentType = structuredResp.DocumentType
+	}
+
+	// Build field mappings with confidence
+	fieldMappings := make(map[string]FormFieldMapping)
+	for key, value := range structuredResp.MappedFields {
+		if value != "" {
+			fieldMappings[key] = FormFieldMapping{
+				FieldName:   key,
+				Value:       value,
+				Confidence:  85,
+				Source:      "typhoon-vision",
+				InputType:   "text",
+				NeedsReview: false,
+			}
+		}
+	}
+
+	fmt.Printf("[Typhoon Vision] Extracted %d field mappings in single call\n", len(fieldMappings))
+
+	return result, fieldMappings, nil
+}
+
+// ExtractAndMapToForm is a convenience method that combines extraction and form mapping
+// Uses single Typhoon Vision call for cost efficiency
+func (s *OCRService) ExtractAndMapToForm(imageBase64 string, placeholders []string) (*TyphoonOCRResult, map[string]FormFieldMapping, error) {
+	// Typhoon is required
+	if s.typhoonAPIKey == "" {
+		return nil, nil, fmt.Errorf("TYPHOON_API_KEY not configured - Typhoon is required")
+	}
+
+	// Try single-call Vision extraction first (more cost-effective)
+	if len(placeholders) > 0 {
+		result, fieldMappings, err := s.ExtractWithTyphoonVision(imageBase64, placeholders)
+		if err == nil && len(result.MappedFields) > 0 {
+			// Enhance with address API if available
+			if s.addressAPIURL != "" {
+				result.MappedFields = s.EnhanceMappingsWithAddressAPI(result.MappedFields, placeholders)
+			}
+			return result, fieldMappings, nil
+		}
+		fmt.Printf("[Typhoon] Vision extraction failed or empty, falling back to OCR + Chat: %v\n", err)
+	}
+
+	// Fallback: Extract with Typhoon OCR
+	result, err := s.ExtractWithTyphoonBase64(imageBase64, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Typhoon OCR failed: %w", err)
+	}
+
+	// Map to form fields using rule-based matching
+	fieldMappings := s.MapTyphoonToFormFields(result, placeholders)
+	result.MappedFields = s.MapTyphoonToPlaceholders(result, placeholders)
+
+	// Enhance with Typhoon Chat for intelligent field mapping
+	if result.RawText != "" && len(placeholders) > 0 {
+		aiMappings, err := s.mapWithTyphoonChat(result.RawText, placeholders)
+		if err != nil {
+			fmt.Printf("[Typhoon Chat] Mapping failed: %v\n", err)
+		} else {
+			for key, value := range aiMappings {
+				if value != "" {
+					result.MappedFields[key] = value
+					if fm, ok := fieldMappings[key]; ok {
+						fm.Value = value
+						fm.Source = "typhoon-ai"
+						fieldMappings[key] = fm
+					} else {
+						fieldMappings[key] = FormFieldMapping{
+							FieldName:   key,
+							Value:       value,
+							Confidence:  85,
+							Source:      "typhoon-ai",
+							InputType:   "text",
+							NeedsReview: false,
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Enhance with address API if available
+	if s.addressAPIURL != "" {
+		result.MappedFields = s.EnhanceMappingsWithAddressAPI(result.MappedFields, placeholders)
+	}
+
+	return result, fieldMappings, nil
+}
+
+// ============================================================================
+// Placeholder Alias Inference using Typhoon
+// ============================================================================
+
+// PlaceholderContext holds a placeholder with its surrounding text context
+type PlaceholderContext struct {
+	Placeholder   string `json:"placeholder"`    // e.g., "{{participant_name}}"
+	CleanName     string `json:"clean_name"`     // e.g., "participant_name"
+	ContextBefore string `json:"context_before"` // Text before placeholder
+	ContextAfter  string `json:"context_after"`  // Text after placeholder
+	FullContext   string `json:"full_context"`   // Combined context
+}
+
+// AliasSuggestion represents an AI-suggested alias for a placeholder
+type AliasSuggestion struct {
+	Placeholder    string  `json:"placeholder"`     // Original placeholder
+	SuggestedAlias string  `json:"suggested_alias"` // AI-suggested Thai alias
+	Confidence     float64 `json:"confidence"`      // Confidence score 0-1
+	Reasoning      string  `json:"reasoning"`       // Why this alias was suggested
+}
+
+// AliasSuggestionResult contains all alias suggestions for a template
+type AliasSuggestionResult struct {
+	Suggestions []AliasSuggestion `json:"suggestions"`
+	Model       string            `json:"model"`
+	Provider    string            `json:"provider"`
+}
+
+// ExtractPlaceholdersWithContext extracts placeholders with surrounding text context
+// contextChars specifies how many characters to capture before and after each placeholder
+func ExtractPlaceholdersWithContext(content string, contextChars int) []PlaceholderContext {
+	var results []PlaceholderContext
+	seen := make(map[string]bool)
+
+	// Remove XML/HTML tags for cleaner context
+	cleanContent := removeHTMLTags(content)
+
+	pos := 0
+	for {
+		startIdx := strings.Index(cleanContent[pos:], "{{")
+		if startIdx == -1 {
+			break
+		}
+		startIdx += pos
+
+		endIdx := strings.Index(cleanContent[startIdx:], "}}")
+		if endIdx == -1 {
+			break
+		}
+		endIdx += startIdx + 2
+
+		placeholder := cleanContent[startIdx:endIdx]
+
+		// Skip if already seen
+		if seen[placeholder] {
+			pos = endIdx
+			continue
+		}
+		seen[placeholder] = true
+
+		// Extract context before
+		contextStart := startIdx - contextChars
+		if contextStart < 0 {
+			contextStart = 0
+		}
+		contextBefore := strings.TrimSpace(cleanContent[contextStart:startIdx])
+
+		// Extract context after
+		contextEnd := endIdx + contextChars
+		if contextEnd > len(cleanContent) {
+			contextEnd = len(cleanContent)
+		}
+		contextAfter := strings.TrimSpace(cleanContent[endIdx:contextEnd])
+
+		// Clean placeholder name
+		cleanName := strings.TrimPrefix(placeholder, "{{")
+		cleanName = strings.TrimSuffix(cleanName, "}}")
+		cleanName = strings.TrimSpace(cleanName)
+
+		results = append(results, PlaceholderContext{
+			Placeholder:   placeholder,
+			CleanName:     cleanName,
+			ContextBefore: contextBefore,
+			ContextAfter:  contextAfter,
+			FullContext:   fmt.Sprintf("%s [%s] %s", contextBefore, placeholder, contextAfter),
+		})
+
+		pos = endIdx
+	}
+
+	return results
+}
+
+// removeHTMLTags removes HTML/XML tags from content
+func removeHTMLTags(content string) string {
+	var result strings.Builder
+	inTag := false
+
+	for _, char := range content {
+		if char == '<' {
+			inTag = true
+		} else if char == '>' {
+			inTag = false
+			result.WriteRune(' ') // Replace tag with space
+		} else if !inTag {
+			result.WriteRune(char)
+		}
+	}
+
+	// Clean up multiple spaces
+	text := result.String()
+	for strings.Contains(text, "  ") {
+		text = strings.ReplaceAll(text, "  ", " ")
+	}
+
+	return text
+}
+
+// SuggestAliases uses Typhoon AI to infer meaningful aliases for placeholders
+// based on their surrounding context in the document
+func (s *OCRService) SuggestAliases(contexts []PlaceholderContext) (*AliasSuggestionResult, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	if len(contexts) == 0 {
+		return &AliasSuggestionResult{
+			Suggestions: []AliasSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	fmt.Printf("[Typhoon Alias] Inferring aliases for %d placeholders\n", len(contexts))
+
+	// Build context descriptions for the prompt
+	var contextDescriptions []string
+	for i, ctx := range contexts {
+		contextDescriptions = append(contextDescriptions, fmt.Sprintf(
+			"%d. Placeholder: %s\n   Context: \"%s\"",
+			i+1, ctx.Placeholder, ctx.FullContext,
+		))
+	}
+
+	// Build prompt for Typhoon
+	prompt := fmt.Sprintf(`คุณเป็นผู้เชี่ยวชาญในการวิเคราะห์เอกสารภาษาไทย
+
+ฉันมี placeholders ในเอกสาร template และต้องการให้คุณแนะนำ "ชื่อที่แสดง" (alias) ที่เหมาะสมเป็นภาษาไทย โดยดูจากบริบทรอบๆ placeholder
+
+%s
+
+กรุณาวิเคราะห์บริบทและแนะนำชื่อภาษาไทยที่เหมาะสมสำหรับแต่ละ placeholder
+
+ตอบเป็น JSON format เท่านั้น:
+{
+  "suggestions": [
+    {
+      "placeholder": "{{placeholder_name}}",
+      "suggested_alias": "ชื่อภาษาไทยที่แนะนำ",
+      "confidence": 0.9,
+      "reasoning": "เหตุผลสั้นๆ"
+    }
+  ]
+}
+
+สำคัญ:
+- ใช้ชื่อ placeholder เดิมให้ตรงกับที่ให้มา
+- แนะนำ alias เป็นภาษาไทยที่กระชับและเข้าใจง่าย
+- confidence เป็นตัวเลข 0-1 (1 = มั่นใจมาก)
+- ตอบเป็น JSON เท่านั้น ไม่ต้องมีคำอธิบายอื่น`, strings.Join(contextDescriptions, "\n\n"))
+
+	// Build Typhoon Chat API request
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2.1-12b-instruct",
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+		"max_tokens":  2048,
+		"temperature": 0.3,
+		"top_p":       0.9,
+	}
+
+	reqBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Call Typhoon Chat API
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 60 * time.Second}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Typhoon API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon")
+	}
+
+	// Parse JSON from response
+	responseText := chatResp.Choices[0].Message.Content
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	fmt.Printf("[Typhoon Alias] Response: %s\n", responseText)
+
+	// Parse suggestions
+	var result AliasSuggestionResult
+	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
+		// Try to extract suggestions array directly
+		var suggestionsOnly struct {
+			Suggestions []AliasSuggestion `json:"suggestions"`
+		}
+		if err2 := json.Unmarshal([]byte(responseText), &suggestionsOnly); err2 != nil {
+			return nil, fmt.Errorf("failed to parse suggestions: %w, response: %s", err, responseText)
+		}
+		result.Suggestions = suggestionsOnly.Suggestions
+	}
+
+	result.Model = "typhoon-v2.1-12b-instruct"
+	result.Provider = "typhoon"
+
+	fmt.Printf("[Typhoon Alias] Generated %d alias suggestions\n", len(result.Suggestions))
+
+	return &result, nil
+}
+
+// SuggestAliasesFromHTML extracts placeholders from HTML content and suggests aliases
+func (s *OCRService) SuggestAliasesFromHTML(htmlContent string) (*AliasSuggestionResult, error) {
+	// Extract placeholders with context (100 chars before/after)
+	contexts := ExtractPlaceholdersWithContext(htmlContent, 100)
+
+	if len(contexts) == 0 {
+		return &AliasSuggestionResult{
+			Suggestions: []AliasSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	return s.SuggestAliases(contexts)
+}
+
+// SuggestAliasesFromPlaceholders suggests aliases for placeholders without context
+// Uses placeholder names to infer meaning
+func (s *OCRService) SuggestAliasesFromPlaceholders(placeholders []string) (*AliasSuggestionResult, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	if len(placeholders) == 0 {
+		return &AliasSuggestionResult{
+			Suggestions: []AliasSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	fmt.Printf("[Typhoon Alias] Inferring aliases for %d placeholders (no context)\n", len(placeholders))
+
+	// Clean placeholder names
+	var cleanNames []string
+	for _, p := range placeholders {
+		clean := strings.TrimPrefix(p, "{{")
+		clean = strings.TrimSuffix(clean, "}}")
+		cleanNames = append(cleanNames, clean)
+	}
+
+	// Build prompt
+	prompt := fmt.Sprintf(`คุณเป็นผู้เชี่ยวชาญในการวิเคราะห์เอกสารภาษาไทย
+
+ฉันมี placeholders ในเอกสาร template ต่อไปนี้:
+%s
+
+กรุณาแนะนำ "ชื่อที่แสดง" (alias) เป็นภาษาไทยที่เหมาะสมสำหรับแต่ละ placeholder โดยดูจากชื่อ placeholder
+
+ตอบเป็น JSON format เท่านั้น:
+{
+  "suggestions": [
+    {
+      "placeholder": "{{placeholder_name}}",
+      "suggested_alias": "ชื่อภาษาไทยที่แนะนำ",
+      "confidence": 0.8,
+      "reasoning": "เหตุผลสั้นๆ"
+    }
+  ]
+}
+
+สำคัญ:
+- ใช้ชื่อ placeholder เดิมให้ตรงกับที่ให้มา (รวม {{ และ }})
+- แนะนำ alias เป็นภาษาไทยที่กระชับและเข้าใจง่าย
+- ถ้า placeholder มี prefix เช่น m_ (แม่), f_ (พ่อ), c_ (เด็ก), b_ (ทารก) ให้ระบุในชื่อด้วย
+- confidence เป็นตัวเลข 0-1
+- ตอบเป็น JSON เท่านั้น`, strings.Join(placeholders, "\n"))
+
+	// Build request
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2.1-12b-instruct",
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+		"max_tokens":  2048,
+		"temperature": 0.3,
+		"top_p":       0.9,
+	}
+
+	reqBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 60 * time.Second}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Typhoon API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon")
+	}
+
+	responseText := chatResp.Choices[0].Message.Content
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	fmt.Printf("[Typhoon Alias] Response: %s\n", responseText)
+
+	var result AliasSuggestionResult
+	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
+		var suggestionsOnly struct {
+			Suggestions []AliasSuggestion `json:"suggestions"`
+		}
+		if err2 := json.Unmarshal([]byte(responseText), &suggestionsOnly); err2 != nil {
+			return nil, fmt.Errorf("failed to parse suggestions: %w, response: %s", err, responseText)
+		}
+		result.Suggestions = suggestionsOnly.Suggestions
+	}
+
+	result.Model = "typhoon-v2.1-12b-instruct"
+	result.Provider = "typhoon"
+
+	fmt.Printf("[Typhoon Alias] Generated %d alias suggestions\n", len(result.Suggestions))
+
+	return &result, nil
+}
+
+// ============================================================================
+// Field Type Inference using Typhoon
+// ============================================================================
+
+// FieldTypeSuggestion represents an AI-suggested field type for a placeholder
+type FieldTypeSuggestion struct {
+	Placeholder    string  `json:"placeholder"`      // Original placeholder
+	SuggestedAlias string  `json:"suggested_alias"`  // AI-suggested Thai alias
+	DataType       string  `json:"data_type"`        // Suggested data type
+	InputType      string  `json:"input_type"`       // Suggested input type
+	Entity         string  `json:"entity"`           // Suggested entity
+	Confidence     float64 `json:"confidence"`       // Confidence score 0-1
+	Reasoning      string  `json:"reasoning"`        // Why this type was suggested
+}
+
+// FieldTypeSuggestionResult contains all field type suggestions for a template
+type FieldTypeSuggestionResult struct {
+	Suggestions []FieldTypeSuggestion `json:"suggestions"`
+	Model       string                `json:"model"`
+	Provider    string                `json:"provider"`
+}
+
+// SuggestFieldTypes uses Typhoon AI to infer field types (data type, input type, entity, alias)
+func (s *OCRService) SuggestFieldTypes(placeholders []string, contexts []PlaceholderContext) (*FieldTypeSuggestionResult, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	if len(placeholders) == 0 {
+		return &FieldTypeSuggestionResult{
+			Suggestions: []FieldTypeSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	fmt.Printf("[Typhoon FieldType] Inferring field types for %d placeholders\n", len(placeholders))
+
+	// Build context descriptions if available
+	contextMap := make(map[string]string)
+	for _, ctx := range contexts {
+		contextMap[ctx.Placeholder] = ctx.FullContext
+	}
+
+	var placeholderDescriptions []string
+	for i, p := range placeholders {
+		desc := fmt.Sprintf("%d. %s", i+1, p)
+		if ctx, ok := contextMap[p]; ok && ctx != "" {
+			desc += fmt.Sprintf("\n   บริบท: \"%s\"", ctx)
+		}
+		placeholderDescriptions = append(placeholderDescriptions, desc)
+	}
+
+	prompt := fmt.Sprintf(`คุณเป็นผู้เชี่ยวชาญในการวิเคราะห์เอกสารและแบบฟอร์มภาษาไทย
+
+ฉันมี placeholders ในเอกสาร template ต่อไปนี้:
+%s
+
+กรุณาวิเคราะห์และแนะนำข้อมูลสำหรับแต่ละ placeholder:
+1. suggested_alias: ชื่อภาษาไทยที่เหมาะสม
+2. data_type: ประเภทข้อมูล (เลือกจาก: text, id_number, date, time, number, address, province, country, name_prefix, name, weekday, phone, email, house_code, zodiac, lunar_month)
+3. input_type: ประเภท input (เลือกจาก: text, select, date, time, number, textarea, checkbox)
+4. entity: หมวดหมู่บุคคล (เลือกจาก: child, mother, father, informant, registrar, general)
+
+คำแนะนำ:
+- ถ้า placeholder มี prefix เช่น m_ หรือ mother_ → entity = "mother"
+- ถ้า placeholder มี prefix เช่น f_ หรือ father_ → entity = "father"
+- ถ้า placeholder มี prefix เช่น c_ หรือ child_ หรือ b_ หรือ baby_ → entity = "child"
+- ถ้า placeholder มี prefix เช่น inf_ หรือ informant_ → entity = "informant"
+- ถ้า placeholder มี prefix เช่น reg_ หรือ registrar_ → entity = "registrar"
+- ถ้ามี date หรือ วัน เดือน ปี → data_type = "date", input_type = "date"
+- ถ้ามี id หรือ บัตรประชาชน → data_type = "id_number"
+- ถ้ามี phone หรือ โทรศัพท์ → data_type = "phone"
+- ถ้ามี address หรือ ที่อยู่ → data_type = "address", input_type = "textarea"
+- ถ้ามี name หรือ ชื่อ → data_type = "name"
+- ถ้ามี prefix หรือ คำนำหน้า → data_type = "name_prefix", input_type = "select"
+
+ตอบเป็น JSON format เท่านั้น:
+{
+  "suggestions": [
+    {
+      "placeholder": "{{placeholder_name}}",
+      "suggested_alias": "ชื่อภาษาไทย",
+      "data_type": "text",
+      "input_type": "text",
+      "entity": "general",
+      "confidence": 0.9,
+      "reasoning": "เหตุผลสั้นๆ"
+    }
+  ]
+}
+
+สำคัญ: ตอบเป็น JSON เท่านั้น`, strings.Join(placeholderDescriptions, "\n\n"))
+
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2.1-12b-instruct",
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"max_tokens":  4096,
+		"temperature": 0.3,
+	}
+
+	reqBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 90 * time.Second}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Typhoon API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon")
+	}
+
+	responseText := chatResp.Choices[0].Message.Content
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	fmt.Printf("[Typhoon FieldType] Response: %s\n", responseText)
+
+	var result FieldTypeSuggestionResult
+	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
+		var suggestionsOnly struct {
+			Suggestions []FieldTypeSuggestion `json:"suggestions"`
+		}
+		if err2 := json.Unmarshal([]byte(responseText), &suggestionsOnly); err2 != nil {
+			return nil, fmt.Errorf("failed to parse suggestions: %w, response: %s", err, responseText)
+		}
+		result.Suggestions = suggestionsOnly.Suggestions
+	}
+
+	result.Model = "typhoon-v2.1-12b-instruct"
+	result.Provider = "typhoon"
+
+	fmt.Printf("[Typhoon FieldType] Generated %d field type suggestions\n", len(result.Suggestions))
+
+	return &result, nil
+}
+
+// SuggestFieldTypesFromPlaceholders suggests field types from placeholder names only
+func (s *OCRService) SuggestFieldTypesFromPlaceholders(placeholders []string) (*FieldTypeSuggestionResult, error) {
+	return s.SuggestFieldTypes(placeholders, nil)
 }
