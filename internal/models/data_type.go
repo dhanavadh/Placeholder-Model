@@ -69,6 +69,10 @@ func DefaultDataTypes() []DataType {
 		{Code: "address", Name: "ที่อยู่", Description: "ที่อยู่พร้อม autocomplete", Pattern: `(?i)(_address|address)`, InputType: "text", Priority: 65, Validation: "{}", Options: "{}"},
 		// Province - matches _prov, province
 		{Code: "province", Name: "จังหวัด", Description: "จังหวัด", Pattern: `(?i)(_prov|province)`, InputType: "text", Priority: 70, Validation: "{}", Options: "{}"},
+		// Subdistrict - matches subdistrict, sub_district, sub-district, tambon (check BEFORE district)
+		{Code: "subdistrict", Name: "ตำบล/แขวง", Description: "ตำบล/แขวง", Pattern: `(?i)(subdistrict|sub_district|sub-district|tambon)`, InputType: "text", Priority: 72, Validation: "{}", Options: "{}"},
+		// District - matches district, amphoe
+		{Code: "district", Name: "อำเภอ/เขต", Description: "อำเภอ/เขต", Pattern: `(?i)(district|amphoe)`, InputType: "text", Priority: 71, Validation: "{}", Options: "{}"},
 		// Country - matches _country, country, _nation, nation
 		{Code: "country", Name: "ประเทศ", Description: "ชื่อประเทศ", Pattern: `(?i)(_country|country|_nation|nation)`, InputType: "select", Priority: 70, Validation: "{}", Options: countryOptions},
 		// Name prefix - matches name_prefix, _prefix
