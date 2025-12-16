@@ -604,3 +604,214 @@ func (h *OCRHandler) SmartOCRExtract(c *gin.Context) {
 
 	c.JSON(http.StatusOK, response)
 }
+
+// ============================================================================
+// Alias Suggestion Endpoints
+// ============================================================================
+
+// SuggestAliasesRequest is the request body for alias suggestion endpoint
+type SuggestAliasesRequest struct {
+	HTMLContent  string   `json:"html_content,omitempty"`  // HTML content with placeholders
+	Placeholders []string `json:"placeholders,omitempty"`  // List of placeholders (if no HTML)
+	UseContext   bool     `json:"use_context"`             // Whether to use context from HTML
+}
+
+// SuggestAliasesResponse is the response from alias suggestion endpoint
+type SuggestAliasesResponse struct {
+	Suggestions []services.AliasSuggestion `json:"suggestions"`
+	Model       string                     `json:"model"`
+	Provider    string                     `json:"provider"`
+	Message     string                     `json:"message"`
+}
+
+// SuggestAliases suggests Thai aliases for placeholders using AI
+// POST /api/v1/templates/:templateId/suggest-aliases
+func (h *OCRHandler) SuggestAliases(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	// Get template
+	template, err := h.getTemplate(templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
+		return
+	}
+
+	// Get placeholders from template
+	placeholders := h.parsePlaceholders(template.Placeholders)
+	if len(placeholders) == 0 {
+		c.JSON(http.StatusOK, SuggestAliasesResponse{
+			Suggestions: []services.AliasSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+			Message:     "No placeholders found in template",
+		})
+		return
+	}
+
+	var result *services.AliasSuggestionResult
+
+	// Check if we have HTML content for context-based inference
+	var req SuggestAliasesRequest
+	if err := c.ShouldBindJSON(&req); err == nil && req.HTMLContent != "" && req.UseContext {
+		// Use HTML content for context-aware alias suggestion
+		result, err = h.ocrService.SuggestAliasesFromHTML(req.HTMLContent)
+	} else {
+		// Use placeholder names only
+		result, err = h.ocrService.SuggestAliasesFromPlaceholders(placeholders)
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, SuggestAliasesResponse{
+		Suggestions: result.Suggestions,
+		Model:       result.Model,
+		Provider:    result.Provider,
+		Message:     fmt.Sprintf("Generated %d alias suggestions for template '%s'", len(result.Suggestions), template.DisplayName),
+	})
+}
+
+// SuggestAliasesFromHTML suggests aliases from HTML content directly
+// POST /api/v1/suggest-aliases
+func (h *OCRHandler) SuggestAliasesFromHTML(c *gin.Context) {
+	var req struct {
+		HTMLContent  string   `json:"html_content"`
+		Placeholders []string `json:"placeholders,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	var result *services.AliasSuggestionResult
+	var err error
+
+	if req.HTMLContent != "" {
+		// Use HTML content for context-aware suggestion
+		result, err = h.ocrService.SuggestAliasesFromHTML(req.HTMLContent)
+	} else if len(req.Placeholders) > 0 {
+		// Use placeholder list only
+		result, err = h.ocrService.SuggestAliasesFromPlaceholders(req.Placeholders)
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Either html_content or placeholders is required"})
+		return
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, SuggestAliasesResponse{
+		Suggestions: result.Suggestions,
+		Model:       result.Model,
+		Provider:    result.Provider,
+		Message:     fmt.Sprintf("Generated %d alias suggestions", len(result.Suggestions)),
+	})
+}
+
+// ============================================================================
+// Field Type Suggestion Endpoints
+// ============================================================================
+
+// FieldTypeSuggestionResponse is the response from field type suggestion endpoint
+type FieldTypeSuggestionResponse struct {
+	Suggestions []services.FieldTypeSuggestion `json:"suggestions"`
+	Model       string                         `json:"model"`
+	Provider    string                         `json:"provider"`
+	Message     string                         `json:"message"`
+}
+
+// SuggestFieldTypes suggests field types (data_type, input_type, entity, alias) for placeholders using AI
+// POST /api/v1/templates/:templateId/suggest-field-types
+func (h *OCRHandler) SuggestFieldTypes(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	// Get template
+	template, err := h.getTemplate(templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
+		return
+	}
+
+	// Get placeholders from template
+	placeholders := h.parsePlaceholders(template.Placeholders)
+	if len(placeholders) == 0 {
+		c.JSON(http.StatusOK, FieldTypeSuggestionResponse{
+			Suggestions: []services.FieldTypeSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+			Message:     "No placeholders found in template",
+		})
+		return
+	}
+
+	// Call service to suggest field types
+	result, err := h.ocrService.SuggestFieldTypesFromPlaceholders(placeholders)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, FieldTypeSuggestionResponse{
+		Suggestions: result.Suggestions,
+		Model:       result.Model,
+		Provider:    result.Provider,
+		Message:     fmt.Sprintf("Generated %d field type suggestions for template '%s'", len(result.Suggestions), template.DisplayName),
+	})
+}
+
+// SuggestFieldTypesFromHTML suggests field types from HTML content directly
+// POST /api/v1/suggest-field-types
+func (h *OCRHandler) SuggestFieldTypesFromHTML(c *gin.Context) {
+	var req struct {
+		HTMLContent  string   `json:"html_content"`
+		Placeholders []string `json:"placeholders,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	var result *services.FieldTypeSuggestionResult
+	var err error
+
+	if req.HTMLContent != "" {
+		// Extract context from HTML and suggest
+		contexts := services.ExtractPlaceholdersWithContext(req.HTMLContent, 100)
+		var placeholders []string
+		for _, ctx := range contexts {
+			placeholders = append(placeholders, ctx.Placeholder)
+		}
+		result, err = h.ocrService.SuggestFieldTypes(placeholders, contexts)
+	} else if len(req.Placeholders) > 0 {
+		result, err = h.ocrService.SuggestFieldTypesFromPlaceholders(req.Placeholders)
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Either html_content or placeholders is required"})
+		return
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, FieldTypeSuggestionResponse{
+		Suggestions: result.Suggestions,
+		Model:       result.Model,
+		Provider:    result.Provider,
+		Message:     fmt.Sprintf("Generated %d field type suggestions", len(result.Suggestions)),
+	})
+}

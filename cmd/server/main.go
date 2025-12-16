@@ -302,6 +302,14 @@ func main() {
 		v1.POST("/ocr/map-fields", ocrHandler.GetFormFieldMappings)
 		v1.POST("/templates/:templateId/ocr/typhoon", ocrHandler.ExtractTyphoonForTemplate)
 
+		// AI Alias Suggestion endpoints (using Typhoon)
+		v1.POST("/templates/:templateId/suggest-aliases", ocrHandler.SuggestAliases)
+		v1.POST("/suggest-aliases", ocrHandler.SuggestAliasesFromHTML)
+
+		// AI Field Type Suggestion endpoints (using Typhoon)
+		v1.POST("/templates/:templateId/suggest-field-types", ocrHandler.SuggestFieldTypes)
+		v1.POST("/suggest-field-types", ocrHandler.SuggestFieldTypesFromHTML)
+
 		// Statistics endpoints
 		v1.GET("/stats", statisticsHandler.GetAll)
 		v1.GET("/stats/summary", statisticsHandler.GetSummary)

@@ -1801,3 +1801,608 @@ func (s *OCRService) ExtractAndMapToForm(imageBase64 string, placeholders []stri
 
 	return result, fieldMappings, nil
 }
+
+// ============================================================================
+// Placeholder Alias Inference using Typhoon
+// ============================================================================
+
+// PlaceholderContext holds a placeholder with its surrounding text context
+type PlaceholderContext struct {
+	Placeholder   string `json:"placeholder"`    // e.g., "{{participant_name}}"
+	CleanName     string `json:"clean_name"`     // e.g., "participant_name"
+	ContextBefore string `json:"context_before"` // Text before placeholder
+	ContextAfter  string `json:"context_after"`  // Text after placeholder
+	FullContext   string `json:"full_context"`   // Combined context
+}
+
+// AliasSuggestion represents an AI-suggested alias for a placeholder
+type AliasSuggestion struct {
+	Placeholder    string  `json:"placeholder"`     // Original placeholder
+	SuggestedAlias string  `json:"suggested_alias"` // AI-suggested Thai alias
+	Confidence     float64 `json:"confidence"`      // Confidence score 0-1
+	Reasoning      string  `json:"reasoning"`       // Why this alias was suggested
+}
+
+// AliasSuggestionResult contains all alias suggestions for a template
+type AliasSuggestionResult struct {
+	Suggestions []AliasSuggestion `json:"suggestions"`
+	Model       string            `json:"model"`
+	Provider    string            `json:"provider"`
+}
+
+// ExtractPlaceholdersWithContext extracts placeholders with surrounding text context
+// contextChars specifies how many characters to capture before and after each placeholder
+func ExtractPlaceholdersWithContext(content string, contextChars int) []PlaceholderContext {
+	var results []PlaceholderContext
+	seen := make(map[string]bool)
+
+	// Remove XML/HTML tags for cleaner context
+	cleanContent := removeHTMLTags(content)
+
+	pos := 0
+	for {
+		startIdx := strings.Index(cleanContent[pos:], "{{")
+		if startIdx == -1 {
+			break
+		}
+		startIdx += pos
+
+		endIdx := strings.Index(cleanContent[startIdx:], "}}")
+		if endIdx == -1 {
+			break
+		}
+		endIdx += startIdx + 2
+
+		placeholder := cleanContent[startIdx:endIdx]
+
+		// Skip if already seen
+		if seen[placeholder] {
+			pos = endIdx
+			continue
+		}
+		seen[placeholder] = true
+
+		// Extract context before
+		contextStart := startIdx - contextChars
+		if contextStart < 0 {
+			contextStart = 0
+		}
+		contextBefore := strings.TrimSpace(cleanContent[contextStart:startIdx])
+
+		// Extract context after
+		contextEnd := endIdx + contextChars
+		if contextEnd > len(cleanContent) {
+			contextEnd = len(cleanContent)
+		}
+		contextAfter := strings.TrimSpace(cleanContent[endIdx:contextEnd])
+
+		// Clean placeholder name
+		cleanName := strings.TrimPrefix(placeholder, "{{")
+		cleanName = strings.TrimSuffix(cleanName, "}}")
+		cleanName = strings.TrimSpace(cleanName)
+
+		results = append(results, PlaceholderContext{
+			Placeholder:   placeholder,
+			CleanName:     cleanName,
+			ContextBefore: contextBefore,
+			ContextAfter:  contextAfter,
+			FullContext:   fmt.Sprintf("%s [%s] %s", contextBefore, placeholder, contextAfter),
+		})
+
+		pos = endIdx
+	}
+
+	return results
+}
+
+// removeHTMLTags removes HTML/XML tags from content
+func removeHTMLTags(content string) string {
+	var result strings.Builder
+	inTag := false
+
+	for _, char := range content {
+		if char == '<' {
+			inTag = true
+		} else if char == '>' {
+			inTag = false
+			result.WriteRune(' ') // Replace tag with space
+		} else if !inTag {
+			result.WriteRune(char)
+		}
+	}
+
+	// Clean up multiple spaces
+	text := result.String()
+	for strings.Contains(text, "  ") {
+		text = strings.ReplaceAll(text, "  ", " ")
+	}
+
+	return text
+}
+
+// SuggestAliases uses Typhoon AI to infer meaningful aliases for placeholders
+// based on their surrounding context in the document
+func (s *OCRService) SuggestAliases(contexts []PlaceholderContext) (*AliasSuggestionResult, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	if len(contexts) == 0 {
+		return &AliasSuggestionResult{
+			Suggestions: []AliasSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	fmt.Printf("[Typhoon Alias] Inferring aliases for %d placeholders\n", len(contexts))
+
+	// Build context descriptions for the prompt
+	var contextDescriptions []string
+	for i, ctx := range contexts {
+		contextDescriptions = append(contextDescriptions, fmt.Sprintf(
+			"%d. Placeholder: %s\n   Context: \"%s\"",
+			i+1, ctx.Placeholder, ctx.FullContext,
+		))
+	}
+
+	// Build prompt for Typhoon
+	prompt := fmt.Sprintf(`คุณเป็นผู้เชี่ยวชาญในการวิเคราะห์เอกสารภาษาไทย
+
+ฉันมี placeholders ในเอกสาร template และต้องการให้คุณแนะนำ "ชื่อที่แสดง" (alias) ที่เหมาะสมเป็นภาษาไทย โดยดูจากบริบทรอบๆ placeholder
+
+%s
+
+กรุณาวิเคราะห์บริบทและแนะนำชื่อภาษาไทยที่เหมาะสมสำหรับแต่ละ placeholder
+
+ตอบเป็น JSON format เท่านั้น:
+{
+  "suggestions": [
+    {
+      "placeholder": "{{placeholder_name}}",
+      "suggested_alias": "ชื่อภาษาไทยที่แนะนำ",
+      "confidence": 0.9,
+      "reasoning": "เหตุผลสั้นๆ"
+    }
+  ]
+}
+
+สำคัญ:
+- ใช้ชื่อ placeholder เดิมให้ตรงกับที่ให้มา
+- แนะนำ alias เป็นภาษาไทยที่กระชับและเข้าใจง่าย
+- confidence เป็นตัวเลข 0-1 (1 = มั่นใจมาก)
+- ตอบเป็น JSON เท่านั้น ไม่ต้องมีคำอธิบายอื่น`, strings.Join(contextDescriptions, "\n\n"))
+
+	// Build Typhoon Chat API request
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2.1-12b-instruct",
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+		"max_tokens":  2048,
+		"temperature": 0.3,
+		"top_p":       0.9,
+	}
+
+	reqBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Call Typhoon Chat API
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 60 * time.Second}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Typhoon API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon")
+	}
+
+	// Parse JSON from response
+	responseText := chatResp.Choices[0].Message.Content
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	fmt.Printf("[Typhoon Alias] Response: %s\n", responseText)
+
+	// Parse suggestions
+	var result AliasSuggestionResult
+	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
+		// Try to extract suggestions array directly
+		var suggestionsOnly struct {
+			Suggestions []AliasSuggestion `json:"suggestions"`
+		}
+		if err2 := json.Unmarshal([]byte(responseText), &suggestionsOnly); err2 != nil {
+			return nil, fmt.Errorf("failed to parse suggestions: %w, response: %s", err, responseText)
+		}
+		result.Suggestions = suggestionsOnly.Suggestions
+	}
+
+	result.Model = "typhoon-v2.1-12b-instruct"
+	result.Provider = "typhoon"
+
+	fmt.Printf("[Typhoon Alias] Generated %d alias suggestions\n", len(result.Suggestions))
+
+	return &result, nil
+}
+
+// SuggestAliasesFromHTML extracts placeholders from HTML content and suggests aliases
+func (s *OCRService) SuggestAliasesFromHTML(htmlContent string) (*AliasSuggestionResult, error) {
+	// Extract placeholders with context (100 chars before/after)
+	contexts := ExtractPlaceholdersWithContext(htmlContent, 100)
+
+	if len(contexts) == 0 {
+		return &AliasSuggestionResult{
+			Suggestions: []AliasSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	return s.SuggestAliases(contexts)
+}
+
+// SuggestAliasesFromPlaceholders suggests aliases for placeholders without context
+// Uses placeholder names to infer meaning
+func (s *OCRService) SuggestAliasesFromPlaceholders(placeholders []string) (*AliasSuggestionResult, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	if len(placeholders) == 0 {
+		return &AliasSuggestionResult{
+			Suggestions: []AliasSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	fmt.Printf("[Typhoon Alias] Inferring aliases for %d placeholders (no context)\n", len(placeholders))
+
+	// Clean placeholder names
+	var cleanNames []string
+	for _, p := range placeholders {
+		clean := strings.TrimPrefix(p, "{{")
+		clean = strings.TrimSuffix(clean, "}}")
+		cleanNames = append(cleanNames, clean)
+	}
+
+	// Build prompt
+	prompt := fmt.Sprintf(`คุณเป็นผู้เชี่ยวชาญในการวิเคราะห์เอกสารภาษาไทย
+
+ฉันมี placeholders ในเอกสาร template ต่อไปนี้:
+%s
+
+กรุณาแนะนำ "ชื่อที่แสดง" (alias) เป็นภาษาไทยที่เหมาะสมสำหรับแต่ละ placeholder โดยดูจากชื่อ placeholder
+
+ตอบเป็น JSON format เท่านั้น:
+{
+  "suggestions": [
+    {
+      "placeholder": "{{placeholder_name}}",
+      "suggested_alias": "ชื่อภาษาไทยที่แนะนำ",
+      "confidence": 0.8,
+      "reasoning": "เหตุผลสั้นๆ"
+    }
+  ]
+}
+
+สำคัญ:
+- ใช้ชื่อ placeholder เดิมให้ตรงกับที่ให้มา (รวม {{ และ }})
+- แนะนำ alias เป็นภาษาไทยที่กระชับและเข้าใจง่าย
+- ถ้า placeholder มี prefix เช่น m_ (แม่), f_ (พ่อ), c_ (เด็ก), b_ (ทารก) ให้ระบุในชื่อด้วย
+- confidence เป็นตัวเลข 0-1
+- ตอบเป็น JSON เท่านั้น`, strings.Join(placeholders, "\n"))
+
+	// Build request
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2.1-12b-instruct",
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+		"max_tokens":  2048,
+		"temperature": 0.3,
+		"top_p":       0.9,
+	}
+
+	reqBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 60 * time.Second}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Typhoon API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon")
+	}
+
+	responseText := chatResp.Choices[0].Message.Content
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	fmt.Printf("[Typhoon Alias] Response: %s\n", responseText)
+
+	var result AliasSuggestionResult
+	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
+		var suggestionsOnly struct {
+			Suggestions []AliasSuggestion `json:"suggestions"`
+		}
+		if err2 := json.Unmarshal([]byte(responseText), &suggestionsOnly); err2 != nil {
+			return nil, fmt.Errorf("failed to parse suggestions: %w, response: %s", err, responseText)
+		}
+		result.Suggestions = suggestionsOnly.Suggestions
+	}
+
+	result.Model = "typhoon-v2.1-12b-instruct"
+	result.Provider = "typhoon"
+
+	fmt.Printf("[Typhoon Alias] Generated %d alias suggestions\n", len(result.Suggestions))
+
+	return &result, nil
+}
+
+// ============================================================================
+// Field Type Inference using Typhoon
+// ============================================================================
+
+// FieldTypeSuggestion represents an AI-suggested field type for a placeholder
+type FieldTypeSuggestion struct {
+	Placeholder    string  `json:"placeholder"`      // Original placeholder
+	SuggestedAlias string  `json:"suggested_alias"`  // AI-suggested Thai alias
+	DataType       string  `json:"data_type"`        // Suggested data type
+	InputType      string  `json:"input_type"`       // Suggested input type
+	Entity         string  `json:"entity"`           // Suggested entity
+	Confidence     float64 `json:"confidence"`       // Confidence score 0-1
+	Reasoning      string  `json:"reasoning"`        // Why this type was suggested
+}
+
+// FieldTypeSuggestionResult contains all field type suggestions for a template
+type FieldTypeSuggestionResult struct {
+	Suggestions []FieldTypeSuggestion `json:"suggestions"`
+	Model       string                `json:"model"`
+	Provider    string                `json:"provider"`
+}
+
+// SuggestFieldTypes uses Typhoon AI to infer field types (data type, input type, entity, alias)
+func (s *OCRService) SuggestFieldTypes(placeholders []string, contexts []PlaceholderContext) (*FieldTypeSuggestionResult, error) {
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
+	}
+
+	if len(placeholders) == 0 {
+		return &FieldTypeSuggestionResult{
+			Suggestions: []FieldTypeSuggestion{},
+			Model:       "typhoon-v2.1-12b-instruct",
+			Provider:    "typhoon",
+		}, nil
+	}
+
+	fmt.Printf("[Typhoon FieldType] Inferring field types for %d placeholders\n", len(placeholders))
+
+	// Build context descriptions if available
+	contextMap := make(map[string]string)
+	for _, ctx := range contexts {
+		contextMap[ctx.Placeholder] = ctx.FullContext
+	}
+
+	var placeholderDescriptions []string
+	for i, p := range placeholders {
+		desc := fmt.Sprintf("%d. %s", i+1, p)
+		if ctx, ok := contextMap[p]; ok && ctx != "" {
+			desc += fmt.Sprintf("\n   บริบท: \"%s\"", ctx)
+		}
+		placeholderDescriptions = append(placeholderDescriptions, desc)
+	}
+
+	prompt := fmt.Sprintf(`คุณเป็นผู้เชี่ยวชาญในการวิเคราะห์เอกสารและแบบฟอร์มภาษาไทย
+
+ฉันมี placeholders ในเอกสาร template ต่อไปนี้:
+%s
+
+กรุณาวิเคราะห์และแนะนำข้อมูลสำหรับแต่ละ placeholder:
+1. suggested_alias: ชื่อภาษาไทยที่เหมาะสม
+2. data_type: ประเภทข้อมูล (เลือกจาก: text, id_number, date, time, number, address, province, country, name_prefix, name, weekday, phone, email, house_code, zodiac, lunar_month)
+3. input_type: ประเภท input (เลือกจาก: text, select, date, time, number, textarea, checkbox)
+4. entity: หมวดหมู่บุคคล (เลือกจาก: child, mother, father, informant, registrar, general)
+
+คำแนะนำ:
+- ถ้า placeholder มี prefix เช่น m_ หรือ mother_ → entity = "mother"
+- ถ้า placeholder มี prefix เช่น f_ หรือ father_ → entity = "father"
+- ถ้า placeholder มี prefix เช่น c_ หรือ child_ หรือ b_ หรือ baby_ → entity = "child"
+- ถ้า placeholder มี prefix เช่น inf_ หรือ informant_ → entity = "informant"
+- ถ้า placeholder มี prefix เช่น reg_ หรือ registrar_ → entity = "registrar"
+- ถ้ามี date หรือ วัน เดือน ปี → data_type = "date", input_type = "date"
+- ถ้ามี id หรือ บัตรประชาชน → data_type = "id_number"
+- ถ้ามี phone หรือ โทรศัพท์ → data_type = "phone"
+- ถ้ามี address หรือ ที่อยู่ → data_type = "address", input_type = "textarea"
+- ถ้ามี name หรือ ชื่อ → data_type = "name"
+- ถ้ามี prefix หรือ คำนำหน้า → data_type = "name_prefix", input_type = "select"
+
+ตอบเป็น JSON format เท่านั้น:
+{
+  "suggestions": [
+    {
+      "placeholder": "{{placeholder_name}}",
+      "suggested_alias": "ชื่อภาษาไทย",
+      "data_type": "text",
+      "input_type": "text",
+      "entity": "general",
+      "confidence": 0.9,
+      "reasoning": "เหตุผลสั้นๆ"
+    }
+  ]
+}
+
+สำคัญ: ตอบเป็น JSON เท่านั้น`, strings.Join(placeholderDescriptions, "\n\n"))
+
+	chatReq := map[string]interface{}{
+		"model": "typhoon-v2.1-12b-instruct",
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"max_tokens":  4096,
+		"temperature": 0.3,
+	}
+
+	reqBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 90 * time.Second}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Typhoon API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon")
+	}
+
+	responseText := chatResp.Choices[0].Message.Content
+	responseText = strings.TrimSpace(responseText)
+	responseText = strings.TrimPrefix(responseText, "```json")
+	responseText = strings.TrimPrefix(responseText, "```")
+	responseText = strings.TrimSuffix(responseText, "```")
+	responseText = strings.TrimSpace(responseText)
+
+	fmt.Printf("[Typhoon FieldType] Response: %s\n", responseText)
+
+	var result FieldTypeSuggestionResult
+	if err := json.Unmarshal([]byte(responseText), &result); err != nil {
+		var suggestionsOnly struct {
+			Suggestions []FieldTypeSuggestion `json:"suggestions"`
+		}
+		if err2 := json.Unmarshal([]byte(responseText), &suggestionsOnly); err2 != nil {
+			return nil, fmt.Errorf("failed to parse suggestions: %w, response: %s", err, responseText)
+		}
+		result.Suggestions = suggestionsOnly.Suggestions
+	}
+
+	result.Model = "typhoon-v2.1-12b-instruct"
+	result.Provider = "typhoon"
+
+	fmt.Printf("[Typhoon FieldType] Generated %d field type suggestions\n", len(result.Suggestions))
+
+	return &result, nil
+}
+
+// SuggestFieldTypesFromPlaceholders suggests field types from placeholder names only
+func (s *OCRService) SuggestFieldTypesFromPlaceholders(placeholders []string) (*FieldTypeSuggestionResult, error) {
+	return s.SuggestFieldTypes(placeholders, nil)
+}
