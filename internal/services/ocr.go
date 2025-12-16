@@ -214,41 +214,75 @@ type GeminiError struct {
 	Message string `json:"message"`
 }
 
-// ExtractTextFromImage calls Google Cloud Vision API to extract text
+// ExtractTextFromImage calls Typhoon OCR API to extract text (OpenAI-compatible vision API)
 func (s *OCRService) ExtractTextFromImage(imageBase64 string) (*OCRResult, error) {
-	if s.visionAPIKey == "" {
-		return nil, fmt.Errorf("GOOGLE_VISION_API_KEY not configured")
+	if s.typhoonAPIKey == "" {
+		return nil, fmt.Errorf("TYPHOON_API_KEY not configured")
 	}
 
-	// Build Vision API request
-	visionReq := VisionRequest{
-		Requests: []VisionRequestItem{
+	// Detect image type from base64 header or default to jpeg
+	imageType := "jpeg"
+	if strings.HasPrefix(imageBase64, "/9j/") {
+		imageType = "jpeg"
+	} else if strings.HasPrefix(imageBase64, "iVBOR") {
+		imageType = "png"
+	} else if strings.HasPrefix(imageBase64, "R0lGOD") {
+		imageType = "gif"
+	}
+
+	// Build Typhoon OCR request (OpenAI-compatible vision format)
+	ocrPrompt := `Extract all text from the image.
+
+Instructions:
+- Only return the clean text content.
+- Do not include any explanation or extra text.
+- You must include all information on the page.
+- Preserve the original layout and structure as much as possible.
+- For tables, format them clearly with proper alignment.
+- For checkboxes, use ☐ for unchecked and ☑ for checked boxes.`
+
+	chatReq := map[string]interface{}{
+		"model": "typhoon-ocr",
+		"messages": []map[string]interface{}{
 			{
-				Image: VisionImage{
-					Content: imageBase64,
-				},
-				Features: []VisionFeature{
+				"role": "user",
+				"content": []map[string]interface{}{
 					{
-						Type:       "DOCUMENT_TEXT_DETECTION",
-						MaxResults: 1,
+						"type": "image_url",
+						"image_url": map[string]string{
+							"url": fmt.Sprintf("data:image/%s;base64,%s", imageType, imageBase64),
+						},
+					},
+					{
+						"type": "text",
+						"text": ocrPrompt,
 					},
 				},
 			},
 		},
+		"max_tokens": 4096,
 	}
 
-	reqBody, err := json.Marshal(visionReq)
+	reqBody, err := json.Marshal(chatReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Call Vision API
-	url := fmt.Sprintf("https://vision.googleapis.com/v1/images:annotate?key=%s", s.visionAPIKey)
-	client := &http.Client{Timeout: 30 * time.Second}
+	// Call Typhoon OCR API
+	url := "https://api.opentyphoon.ai/v1/chat/completions"
+	client := &http.Client{Timeout: 90 * time.Second}
 
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("failed to call Vision API: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.typhoonAPIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Typhoon OCR API: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -258,26 +292,26 @@ func (s *OCRService) ExtractTextFromImage(imageBase64 string) (*OCRResult, error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Vision API error: %s", string(body))
+		return nil, fmt.Errorf("Typhoon OCR API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	var visionResp VisionResponse
-	if err := json.Unmarshal(body, &visionResp); err != nil {
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &chatResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	if len(visionResp.Responses) == 0 {
-		return nil, fmt.Errorf("no response from Vision API")
+	if len(chatResp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from Typhoon OCR API")
 	}
 
-	if visionResp.Responses[0].Error != nil {
-		return nil, fmt.Errorf("Vision API error: %s", visionResp.Responses[0].Error.Message)
-	}
-
-	rawText := ""
-	if visionResp.Responses[0].FullTextAnnotation != nil {
-		rawText = visionResp.Responses[0].FullTextAnnotation.Text
-	}
+	rawText := chatResp.Choices[0].Message.Content
 
 	// Parse the extracted text
 	result := s.parseExtractedText(rawText)
