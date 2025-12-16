@@ -757,8 +757,40 @@ func (h *OCRHandler) SuggestFieldTypes(c *gin.Context) {
 		return
 	}
 
-	// Call service to suggest field types
-	result, err := h.ocrService.SuggestFieldTypesFromPlaceholders(placeholders)
+	// Fetch configurable data types from database
+	var dbDataTypes []models.DataType
+	if err := internal.DB.Where("is_active = ?", true).Order("priority DESC").Find(&dbDataTypes).Error; err != nil {
+		fmt.Printf("[SuggestFieldTypes] Warning: Failed to fetch data types from DB: %v, using fallback\n", err)
+		// Fallback to old method if DB fails
+		result, err := h.ocrService.SuggestFieldTypesFromPlaceholders(placeholders)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, FieldTypeSuggestionResponse{
+			Suggestions: result.Suggestions,
+			Model:       result.Model,
+			Provider:    result.Provider,
+			Message:     fmt.Sprintf("Generated %d field type suggestions for template '%s'", len(result.Suggestions), template.DisplayName),
+		})
+		return
+	}
+
+	// Convert to service data type info
+	var dataTypeInfos []services.DataTypeInfo
+	for _, dt := range dbDataTypes {
+		dataTypeInfos = append(dataTypeInfos, services.DataTypeInfo{
+			Code:        dt.Code,
+			Name:        dt.Name,
+			Description: dt.Description,
+			Pattern:     dt.Pattern,
+		})
+	}
+
+	fmt.Printf("[SuggestFieldTypes] Using %d data types from database\n", len(dataTypeInfos))
+
+	// Call service with dynamic data types
+	result, err := h.ocrService.SuggestFieldTypesWithDataTypes(placeholders, nil, dataTypeInfos)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -768,7 +800,7 @@ func (h *OCRHandler) SuggestFieldTypes(c *gin.Context) {
 		Suggestions: result.Suggestions,
 		Model:       result.Model,
 		Provider:    result.Provider,
-		Message:     fmt.Sprintf("Generated %d field type suggestions for template '%s'", len(result.Suggestions), template.DisplayName),
+		Message:     fmt.Sprintf("Generated %d field type suggestions for template '%s' using %d configured data types", len(result.Suggestions), template.DisplayName, len(dataTypeInfos)),
 	})
 }
 
@@ -785,6 +817,22 @@ func (h *OCRHandler) SuggestFieldTypesFromHTML(c *gin.Context) {
 		return
 	}
 
+	// Fetch configurable data types from database
+	var dbDataTypes []models.DataType
+	var dataTypeInfos []services.DataTypeInfo
+	if err := internal.DB.Where("is_active = ?", true).Order("priority DESC").Find(&dbDataTypes).Error; err != nil {
+		fmt.Printf("[SuggestFieldTypesFromHTML] Warning: Failed to fetch data types from DB: %v\n", err)
+	} else {
+		for _, dt := range dbDataTypes {
+			dataTypeInfos = append(dataTypeInfos, services.DataTypeInfo{
+				Code:        dt.Code,
+				Name:        dt.Name,
+				Description: dt.Description,
+				Pattern:     dt.Pattern,
+			})
+		}
+	}
+
 	var result *services.FieldTypeSuggestionResult
 	var err error
 
@@ -795,9 +843,17 @@ func (h *OCRHandler) SuggestFieldTypesFromHTML(c *gin.Context) {
 		for _, ctx := range contexts {
 			placeholders = append(placeholders, ctx.Placeholder)
 		}
-		result, err = h.ocrService.SuggestFieldTypes(placeholders, contexts)
+		if len(dataTypeInfos) > 0 {
+			result, err = h.ocrService.SuggestFieldTypesWithDataTypes(placeholders, contexts, dataTypeInfos)
+		} else {
+			result, err = h.ocrService.SuggestFieldTypes(placeholders, contexts)
+		}
 	} else if len(req.Placeholders) > 0 {
-		result, err = h.ocrService.SuggestFieldTypesFromPlaceholders(req.Placeholders)
+		if len(dataTypeInfos) > 0 {
+			result, err = h.ocrService.SuggestFieldTypesWithDataTypes(req.Placeholders, nil, dataTypeInfos)
+		} else {
+			result, err = h.ocrService.SuggestFieldTypesFromPlaceholders(req.Placeholders)
+		}
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Either html_content or placeholders is required"})
 		return
@@ -812,6 +868,6 @@ func (h *OCRHandler) SuggestFieldTypesFromHTML(c *gin.Context) {
 		Suggestions: result.Suggestions,
 		Model:       result.Model,
 		Provider:    result.Provider,
-		Message:     fmt.Sprintf("Generated %d field type suggestions", len(result.Suggestions)),
+		Message:     fmt.Sprintf("Generated %d field type suggestions using %d configured data types", len(result.Suggestions), len(dataTypeInfos)),
 	})
 }
