@@ -237,6 +237,10 @@ func main() {
 		// Template management
 		v1.POST("/upload", docxHandler.UploadTemplate)
 		v1.GET("/templates", docxHandler.GetAllTemplates)
+
+		// Thumbnail regeneration (must be BEFORE :templateId routes)
+		v1.POST("/templates/regenerate-thumbnails", docxHandler.RegenerateThumbnails)
+
 		v1.GET("/templates/:templateId/placeholders", docxHandler.GetPlaceholders)
 		v1.GET("/templates/:templateId/preview", docxHandler.GetHTMLPreview)           // HTML preview (auto-generated from DOCX)
 		v1.GET("/templates/:templateId/preview/pdf", docxHandler.GetPDFPreview)        // PDF preview (auto-generated from DOCX)
@@ -244,9 +248,6 @@ func main() {
 		v1.PUT("/templates/:templateId", docxHandler.UpdateTemplate)
 		v1.DELETE("/templates/:templateId", docxHandler.DeleteTemplate)
 		v1.POST("/templates/:templateId/files", docxHandler.ReplaceTemplateFiles)
-
-		// Thumbnail regeneration (for existing templates)
-		v1.POST("/templates/regenerate-thumbnails", docxHandler.RegenerateThumbnails)
 
 		// Field definitions (auto-detected from placeholders)
 		v1.GET("/templates/:templateId/field-definitions", docxHandler.GetFieldDefinitions)
