@@ -327,6 +327,97 @@ func (h *DocxHandler) GetHTMLPreview(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(htmlContent))
 }
 
+// GetPDFPreview returns the PDF preview of a template
+// If PDF doesn't exist, it generates one on-the-fly from the DOCX
+func (h *DocxHandler) GetPDFPreview(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	template, err := h.templateService.GetTemplate(templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
+		return
+	}
+
+	// If PDF doesn't exist, try to generate it on-the-fly
+	if template.GCSPathPDF == "" {
+		fmt.Printf("[INFO] PDF preview not found for template %s, generating on-the-fly...\n", templateID)
+
+		// Generate and store PDF preview
+		pdfContent, newPdfPath, err := h.templateService.GenerateAndStorePDFPreview(c.Request.Context(), template)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to generate PDF preview: %v", err)})
+			return
+		}
+
+		// Return the generated PDF directly
+		filename := strings.TrimSuffix(template.Filename, filepath.Ext(template.Filename)) + ".pdf"
+		c.Header("Content-Type", "application/pdf")
+		c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%s", filename))
+		c.Data(http.StatusOK, "application/pdf", pdfContent)
+
+		fmt.Printf("[INFO] Generated PDF preview on-the-fly for template %s, stored at %s\n", templateID, newPdfPath)
+		return
+	}
+
+	// Get PDF content from storage
+	reader, err := h.templateService.GetPDFPreview(c.Request.Context(), template.GCSPathPDF)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to retrieve PDF preview: %v", err)})
+		return
+	}
+	defer reader.Close()
+
+	// Set headers for PDF
+	filename := strings.TrimSuffix(template.Filename, filepath.Ext(template.Filename)) + ".pdf"
+	c.Header("Content-Type", "application/pdf")
+	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%s", filename))
+
+	// Stream the PDF to the client
+	io.Copy(c.Writer, reader)
+}
+
+// GetThumbnail returns the thumbnail image for a template
+func (h *DocxHandler) GetThumbnail(c *gin.Context) {
+	templateID := c.Param("templateId")
+	if templateID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Template ID is required"})
+		return
+	}
+
+	template, err := h.templateService.GetTemplate(templateID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Template not found"})
+		return
+	}
+
+	// Check if thumbnail exists
+	if template.GCSPathThumbnail == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Thumbnail not found for this template"})
+		return
+	}
+
+	// Get thumbnail content from storage
+	reader, err := h.templateService.GetThumbnail(c.Request.Context(), template.GCSPathThumbnail)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to retrieve thumbnail: %v", err)})
+		return
+	}
+	defer reader.Close()
+
+	// Set headers for PNG image
+	filename := strings.TrimSuffix(template.Filename, filepath.Ext(template.Filename)) + "_thumb.png"
+	c.Header("Content-Type", "image/png")
+	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%s", filename))
+	c.Header("Cache-Control", "public, max-age=86400") // Cache for 24 hours
+
+	// Stream the thumbnail to the client
+	io.Copy(c.Writer, reader)
+}
+
 func (h *DocxHandler) ProcessDocument(c *gin.Context) {
 	templateID := c.Param("templateId")
 	if templateID == "" {
@@ -769,9 +860,25 @@ func (h *DocxHandler) ReplaceTemplateFiles(c *gin.Context) {
 		htmlHeader = nil
 	}
 
+	// Get optional thumbnail file
+	var thumbnailFile multipart.File
+	var thumbnailHeader *multipart.FileHeader
+	thumbnailFile, thumbnailHeader, err = c.Request.FormFile("thumbnail")
+	if err == nil {
+		defer thumbnailFile.Close()
+		ext := strings.ToLower(filepath.Ext(thumbnailHeader.Filename))
+		if ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Thumbnail must be .png, .jpg, .jpeg, or .webp"})
+			return
+		}
+	} else {
+		thumbnailFile = nil
+		thumbnailHeader = nil
+	}
+
 	// At least one file must be provided
-	if docxFile == nil && htmlFile == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one file (docx or html) must be provided"})
+	if docxFile == nil && htmlFile == nil && thumbnailFile == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one file (docx, html, or thumbnail) must be provided"})
 		return
 	}
 
@@ -779,7 +886,7 @@ func (h *DocxHandler) ReplaceTemplateFiles(c *gin.Context) {
 	regenerateFields := c.PostForm("regenerate_fields") == "true"
 
 	// Replace files
-	template, err := h.templateService.ReplaceTemplateFiles(c.Request.Context(), templateID, docxFile, docxHeader, htmlFile, htmlHeader, regenerateFields)
+	template, err := h.templateService.ReplaceTemplateFiles(c.Request.Context(), templateID, docxFile, docxHeader, htmlFile, htmlHeader, thumbnailFile, thumbnailHeader, regenerateFields)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to replace files: %v", err)})
 		return

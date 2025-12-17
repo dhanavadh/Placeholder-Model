@@ -43,8 +43,10 @@ type Template struct {
 	Description  string         `json:"description"`
 	Author       string         `json:"author"`
 	Category     Category       `gorm:"type:varchar(50)" json:"category"`
-	GCSPath      string         `gorm:"column:gcs_path_docx" json:"gcs_path"`
-	GCSPathHTML  string         `gorm:"column:gcs_path_html" json:"gcs_path_html"` // Path to HTML preview file
+	GCSPath          string         `gorm:"column:gcs_path_docx" json:"gcs_path"`
+	GCSPathHTML      string         `gorm:"column:gcs_path_html" json:"gcs_path_html"`           // Path to HTML preview file (auto-generated from DOCX)
+	GCSPathPDF       string         `gorm:"column:gcs_path_pdf" json:"gcs_path_pdf"`             // Path to PDF preview file (auto-generated from DOCX)
+	GCSPathThumbnail string         `gorm:"column:gcs_path_thumbnail" json:"gcs_path_thumbnail"` // Path to thumbnail image (PNG) for gallery preview
 	FileSize     int64          `json:"file_size"`
 	MimeType     string         `json:"mime_type"`
 	Placeholders string         `gorm:"type:json" json:"placeholders"` // JSON array of placeholder strings

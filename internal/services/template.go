@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,13 +23,19 @@ import (
 )
 
 type TemplateService struct {
-	storageClient storage.StorageClient
+	storageClient     storage.StorageClient
+	conversionService *ConversionService
 }
 
 func NewTemplateService(storageClient storage.StorageClient) *TemplateService {
 	return &TemplateService{
 		storageClient: storageClient,
 	}
+}
+
+// SetConversionService sets the conversion service for automatic HTML/PDF generation
+func (s *TemplateService) SetConversionService(convService *ConversionService) {
+	s.conversionService = convService
 }
 
 // generateFieldDefinitionsFromDatabase generates field definitions using Data Types from database
@@ -224,18 +231,6 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 		return nil, fmt.Errorf("failed to upload to GCS: %w", err)
 	}
 
-	// Upload HTML preview file if provided
-	var htmlObjectName string
-	if htmlFile != nil && htmlHeader != nil {
-		htmlObjectName = storage.GenerateObjectName(templateID, htmlHeader.Filename)
-		_, err := s.storageClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
-		if err != nil {
-			// Clean up DOCX file on error
-			s.storageClient.DeleteFile(ctx, objectName)
-			return nil, fmt.Errorf("failed to upload HTML preview to GCS: %w", err)
-		}
-	}
-
 	// Create temp file for processing
 	file.Seek(0, 0) // Reset file pointer
 	tempFile, err := s.createTempFile(file)
@@ -245,6 +240,92 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer s.cleanupTempFile(tempFile)
+
+	// Upload HTML preview file if provided, otherwise auto-generate
+	var htmlObjectName string
+	if htmlFile != nil && htmlHeader != nil {
+		// User provided HTML file
+		htmlObjectName = storage.GenerateObjectName(templateID, htmlHeader.Filename)
+		_, err := s.storageClient.UploadFile(ctx, htmlFile, htmlObjectName, "text/html")
+		if err != nil {
+			s.storageClient.DeleteFile(ctx, objectName)
+			return nil, fmt.Errorf("failed to upload HTML preview to GCS: %w", err)
+		}
+		fmt.Printf("[INFO] Uploaded user-provided HTML preview for template %s\n", templateID)
+	} else if s.conversionService != nil && s.conversionService.IsHTMLConversionAvailable() {
+		// Auto-generate HTML preview from DOCX
+		fmt.Printf("[INFO] Auto-generating HTML preview for template %s\n", templateID)
+		htmlContent, err := s.conversionService.ConvertDocxToHTML(ctx, tempFile)
+		if err != nil {
+			// Log warning but don't fail - HTML preview is optional
+			fmt.Printf("[WARNING] Failed to auto-generate HTML preview: %v\n", err)
+		} else {
+			// Upload generated HTML
+			htmlFileName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".html"
+			htmlObjectName = storage.GenerateObjectName(templateID, htmlFileName)
+			htmlReader := strings.NewReader(string(htmlContent))
+			_, err := s.storageClient.UploadFile(ctx, io.NopCloser(htmlReader), htmlObjectName, "text/html")
+			if err != nil {
+				fmt.Printf("[WARNING] Failed to upload auto-generated HTML preview: %v\n", err)
+				htmlObjectName = "" // Reset on failure
+			} else {
+				fmt.Printf("[INFO] Successfully auto-generated HTML preview for template %s\n", templateID)
+			}
+		}
+	}
+
+	// Auto-generate PDF preview and thumbnail
+	var pdfObjectName string
+	var thumbnailObjectName string
+	if s.conversionService != nil && s.conversionService.IsPDFConversionAvailable() {
+		fmt.Printf("[INFO] Auto-generating PDF preview for template %s\n", templateID)
+		pdfContent, err := s.conversionService.ConvertDocxToPDF(ctx, tempFile)
+		if err != nil {
+			// Log warning but don't fail - PDF preview is optional
+			fmt.Printf("[WARNING] Failed to auto-generate PDF preview: %v\n", err)
+		} else {
+			// Upload generated PDF
+			pdfFileName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
+			pdfObjectName = storage.GenerateObjectName(templateID, pdfFileName)
+			pdfReader := bytes.NewReader(pdfContent)
+			_, err := s.storageClient.UploadFile(ctx, io.NopCloser(pdfReader), pdfObjectName, "application/pdf")
+			if err != nil {
+				fmt.Printf("[WARNING] Failed to upload auto-generated PDF preview: %v\n", err)
+				pdfObjectName = "" // Reset on failure
+			} else {
+				fmt.Printf("[INFO] Successfully auto-generated PDF preview for template %s\n", templateID)
+
+				// Generate thumbnail from PDF
+				if s.conversionService.IsThumbnailGenerationAvailable() {
+					fmt.Printf("[INFO] Generating thumbnail for template %s\n", templateID)
+					// Create temp PDF file for thumbnail generation
+					pdfTempFile, err := os.CreateTemp("", "*.pdf")
+					if err == nil {
+						pdfTempFile.Write(pdfContent)
+						pdfTempFile.Close()
+						defer os.Remove(pdfTempFile.Name())
+
+						thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDF(ctx, pdfTempFile.Name(), 300)
+						if err != nil {
+							fmt.Printf("[WARNING] Failed to generate thumbnail: %v\n", err)
+						} else {
+							// Upload thumbnail
+							thumbnailFileName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + "_thumb.png"
+							thumbnailObjectName = storage.GenerateObjectName(templateID, thumbnailFileName)
+							thumbnailReader := bytes.NewReader(thumbnailContent)
+							_, err := s.storageClient.UploadFile(ctx, io.NopCloser(thumbnailReader), thumbnailObjectName, "image/png")
+							if err != nil {
+								fmt.Printf("[WARNING] Failed to upload thumbnail: %v\n", err)
+								thumbnailObjectName = ""
+							} else {
+								fmt.Printf("[INFO] Successfully generated thumbnail for template %s\n", templateID)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// Process DOCX to extract placeholders
 	proc := processor.NewDocxProcessor(tempFile, "")
@@ -285,6 +366,8 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 		Author:           author,
 		GCSPath:          objectName,
 		GCSPathHTML:      htmlObjectName,
+		GCSPathPDF:       pdfObjectName,
+		GCSPathThumbnail: thumbnailObjectName,
 		FileSize:         result.Size,
 		MimeType:         header.Header.Get("Content-Type"),
 		Placeholders:     string(placeholdersJSON),
@@ -524,7 +607,8 @@ func (s *TemplateService) UpdateTemplate(ctx context.Context, templateID string,
 
 // ReplaceTemplateFiles replaces the DOCX and/or HTML files for an existing template
 // If regenerateFields is true, field definitions will be regenerated from the new placeholders
-func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID string, docxFile multipart.File, docxHeader *multipart.FileHeader, htmlFile multipart.File, htmlHeader *multipart.FileHeader, regenerateFields bool) (*models.Template, error) {
+// HTML and PDF previews are auto-generated from the new DOCX file
+func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID string, docxFile multipart.File, docxHeader *multipart.FileHeader, htmlFile multipart.File, htmlHeader *multipart.FileHeader, thumbnailFile multipart.File, thumbnailHeader *multipart.FileHeader, regenerateFields bool) (*models.Template, error) {
 	template, err := s.GetTemplate(templateID)
 	if err != nil {
 		return nil, err
@@ -552,6 +636,98 @@ func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID s
 			return nil, fmt.Errorf("failed to create temp file: %w", err)
 		}
 		defer s.cleanupTempFile(tempFile)
+
+		// Auto-generate HTML preview from DOCX (unless user provides HTML file)
+		if htmlFile == nil && s.conversionService != nil && s.conversionService.IsHTMLConversionAvailable() {
+			fmt.Printf("[INFO] Auto-generating HTML preview for template %s\n", templateID)
+			htmlContent, err := s.conversionService.ConvertDocxToHTML(ctx, tempFile)
+			if err != nil {
+				fmt.Printf("[WARNING] Failed to auto-generate HTML preview: %v\n", err)
+			} else {
+				// Delete old HTML file
+				if template.GCSPathHTML != "" {
+					if err := s.storageClient.DeleteFile(ctx, template.GCSPathHTML); err != nil {
+						fmt.Printf("Warning: failed to delete old HTML file %s: %v\n", template.GCSPathHTML, err)
+					}
+				}
+
+				// Upload generated HTML
+				htmlFileName := strings.TrimSuffix(docxHeader.Filename, filepath.Ext(docxHeader.Filename)) + ".html"
+				htmlObjectName := storage.GenerateObjectName(templateID, htmlFileName)
+				htmlReader := strings.NewReader(string(htmlContent))
+				_, err := s.storageClient.UploadFile(ctx, io.NopCloser(htmlReader), htmlObjectName, "text/html")
+				if err != nil {
+					fmt.Printf("[WARNING] Failed to upload auto-generated HTML preview: %v\n", err)
+				} else {
+					template.GCSPathHTML = htmlObjectName
+					fmt.Printf("[INFO] Successfully auto-generated HTML preview for template %s\n", templateID)
+				}
+			}
+		}
+
+		// Auto-generate PDF preview and thumbnail from DOCX
+		if s.conversionService != nil && s.conversionService.IsPDFConversionAvailable() {
+			fmt.Printf("[INFO] Auto-generating PDF preview for template %s\n", templateID)
+			pdfContent, err := s.conversionService.ConvertDocxToPDF(ctx, tempFile)
+			if err != nil {
+				fmt.Printf("[WARNING] Failed to auto-generate PDF preview: %v\n", err)
+			} else {
+				// Delete old PDF file
+				if template.GCSPathPDF != "" {
+					if err := s.storageClient.DeleteFile(ctx, template.GCSPathPDF); err != nil {
+						fmt.Printf("Warning: failed to delete old PDF file %s: %v\n", template.GCSPathPDF, err)
+					}
+				}
+
+				// Upload generated PDF
+				pdfFileName := strings.TrimSuffix(docxHeader.Filename, filepath.Ext(docxHeader.Filename)) + ".pdf"
+				pdfObjectName := storage.GenerateObjectName(templateID, pdfFileName)
+				pdfReader := bytes.NewReader(pdfContent)
+				_, err := s.storageClient.UploadFile(ctx, io.NopCloser(pdfReader), pdfObjectName, "application/pdf")
+				if err != nil {
+					fmt.Printf("[WARNING] Failed to upload auto-generated PDF preview: %v\n", err)
+				} else {
+					template.GCSPathPDF = pdfObjectName
+					fmt.Printf("[INFO] Successfully auto-generated PDF preview for template %s\n", templateID)
+
+					// Generate thumbnail from PDF
+					if s.conversionService.IsThumbnailGenerationAvailable() {
+						fmt.Printf("[INFO] Generating thumbnail for template %s\n", templateID)
+						// Create temp PDF file for thumbnail generation
+						pdfTempFile, err := os.CreateTemp("", "*.pdf")
+						if err == nil {
+							pdfTempFile.Write(pdfContent)
+							pdfTempFile.Close()
+							defer os.Remove(pdfTempFile.Name())
+
+							thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDF(ctx, pdfTempFile.Name(), 300)
+							if err != nil {
+								fmt.Printf("[WARNING] Failed to generate thumbnail: %v\n", err)
+							} else {
+								// Delete old thumbnail
+								if template.GCSPathThumbnail != "" {
+									if err := s.storageClient.DeleteFile(ctx, template.GCSPathThumbnail); err != nil {
+										fmt.Printf("Warning: failed to delete old thumbnail %s: %v\n", template.GCSPathThumbnail, err)
+									}
+								}
+
+								// Upload thumbnail
+								thumbnailFileName := strings.TrimSuffix(docxHeader.Filename, filepath.Ext(docxHeader.Filename)) + "_thumb.png"
+								thumbnailObjectName := storage.GenerateObjectName(templateID, thumbnailFileName)
+								thumbnailReader := bytes.NewReader(thumbnailContent)
+								_, err := s.storageClient.UploadFile(ctx, io.NopCloser(thumbnailReader), thumbnailObjectName, "image/png")
+								if err != nil {
+									fmt.Printf("[WARNING] Failed to upload thumbnail: %v\n", err)
+								} else {
+									template.GCSPathThumbnail = thumbnailObjectName
+									fmt.Printf("[INFO] Successfully generated thumbnail for template %s\n", templateID)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 
 		// Process DOCX to extract placeholders
 		proc := processor.NewDocxProcessor(tempFile, "")
@@ -598,7 +774,7 @@ func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID s
 		}
 	}
 
-	// Handle HTML file replacement
+	// Handle HTML file replacement (manual override)
 	if htmlFile != nil && htmlHeader != nil {
 		// Validate file extension
 		if ext := strings.ToLower(filepath.Ext(htmlHeader.Filename)); ext != ".html" && ext != ".htm" {
@@ -620,6 +796,41 @@ func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID s
 		}
 
 		template.GCSPathHTML = htmlObjectName
+	}
+
+	// Handle thumbnail file replacement (manual override)
+	if thumbnailFile != nil && thumbnailHeader != nil {
+		// Validate file extension
+		ext := strings.ToLower(filepath.Ext(thumbnailHeader.Filename))
+		if ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp" {
+			return nil, fmt.Errorf("invalid file type: expected .png, .jpg, .jpeg, or .webp, got %s", ext)
+		}
+
+		// Determine content type
+		contentType := "image/png"
+		switch ext {
+		case ".jpg", ".jpeg":
+			contentType = "image/jpeg"
+		case ".webp":
+			contentType = "image/webp"
+		}
+
+		// Upload new thumbnail file
+		thumbnailObjectName := storage.GenerateObjectName(templateID, thumbnailHeader.Filename)
+		_, err := s.storageClient.UploadFile(ctx, thumbnailFile, thumbnailObjectName, contentType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload thumbnail file: %w", err)
+		}
+
+		// Delete old thumbnail file
+		if template.GCSPathThumbnail != "" {
+			if err := s.storageClient.DeleteFile(ctx, template.GCSPathThumbnail); err != nil {
+				fmt.Printf("Warning: failed to delete old thumbnail file %s: %v\n", template.GCSPathThumbnail, err)
+			}
+		}
+
+		template.GCSPathThumbnail = thumbnailObjectName
+		fmt.Printf("[INFO] Custom thumbnail uploaded for template %s\n", templateID)
 	}
 
 	// Save to database
@@ -663,6 +874,83 @@ func (s *TemplateService) GetHTMLPreview(ctx context.Context, gcsPath string) (s
 	}
 
 	return string(content), nil
+}
+
+// GetPDFPreview returns a reader for the PDF preview of a template
+func (s *TemplateService) GetPDFPreview(ctx context.Context, gcsPath string) (io.ReadCloser, error) {
+	reader, err := s.storageClient.ReadFile(ctx, gcsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PDF preview from storage: %w", err)
+	}
+	return reader, nil
+}
+
+// GetThumbnail returns a reader for the thumbnail image of a template
+func (s *TemplateService) GetThumbnail(ctx context.Context, gcsPath string) (io.ReadCloser, error) {
+	reader, err := s.storageClient.ReadFile(ctx, gcsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read thumbnail from storage: %w", err)
+	}
+	return reader, nil
+}
+
+// GenerateAndStorePDFPreview generates a PDF preview from the DOCX and stores it
+// Returns the PDF content and the new GCS path
+func (s *TemplateService) GenerateAndStorePDFPreview(ctx context.Context, template *models.Template) ([]byte, string, error) {
+	if s.conversionService == nil || !s.conversionService.IsPDFConversionAvailable() {
+		return nil, "", fmt.Errorf("PDF conversion is not available")
+	}
+
+	if template.GCSPath == "" {
+		return nil, "", fmt.Errorf("template has no DOCX file")
+	}
+
+	// Download DOCX from storage
+	reader, err := s.storageClient.ReadFile(ctx, template.GCSPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read DOCX from storage: %w", err)
+	}
+	defer reader.Close()
+
+	// Create temp file for the DOCX
+	tempFile, err := os.CreateTemp("", "*.docx")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	// Copy DOCX content to temp file
+	if _, err := io.Copy(tempFile, reader); err != nil {
+		tempFile.Close()
+		return nil, "", fmt.Errorf("failed to write temp file: %w", err)
+	}
+	tempFile.Close()
+
+	// Convert to PDF
+	pdfContent, err := s.conversionService.ConvertDocxToPDF(ctx, tempPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to convert to PDF: %w", err)
+	}
+
+	// Upload PDF to storage
+	pdfFileName := strings.TrimSuffix(template.Filename, filepath.Ext(template.Filename)) + ".pdf"
+	pdfObjectName := storage.GenerateObjectName(template.ID, pdfFileName)
+	pdfReader := bytes.NewReader(pdfContent)
+	_, err = s.storageClient.UploadFile(ctx, io.NopCloser(pdfReader), pdfObjectName, "application/pdf")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to upload PDF: %w", err)
+	}
+
+	// Update template with new PDF path
+	template.GCSPathPDF = pdfObjectName
+	if err := internal.DB.Save(template).Error; err != nil {
+		// Log warning but don't fail - PDF was already generated
+		fmt.Printf("[WARNING] Failed to update template with PDF path: %v\n", err)
+	}
+
+	fmt.Printf("[INFO] Generated and stored PDF preview for template %s at %s\n", template.ID, pdfObjectName)
+	return pdfContent, pdfObjectName, nil
 }
 
 // UpdateFieldDefinitions updates the field definitions for a template

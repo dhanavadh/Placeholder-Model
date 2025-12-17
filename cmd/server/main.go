@@ -79,6 +79,18 @@ func main() {
 		log.Printf("PDF service initialized with URL: %s, timeout: %s", cfg.Gotenberg.URL, cfg.Gotenberg.Timeout)
 	}
 
+	// Initialize Conversion service for automatic DOCX to HTML/PDF conversion
+	conversionService, err := services.NewConversionService(cfg.Gotenberg.URL, cfg.Gotenberg.Timeout)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize Conversion service: %v", err)
+		conversionService = nil // Continue without conversion service
+	} else {
+		log.Printf("Conversion service initialized (HTML conversion available: %v, PDF conversion available: %v)",
+			conversionService.IsHTMLConversionAvailable(), conversionService.IsPDFConversionAvailable())
+		// Set conversion service on template service for auto-generation
+		templateService.SetConversionService(conversionService)
+	}
+
 	documentService := services.NewDocumentService(storageClient, templateService, pdfService)
 
 	// Configure LibreOffice processing if enabled
@@ -226,7 +238,9 @@ func main() {
 		v1.POST("/upload", docxHandler.UploadTemplate)
 		v1.GET("/templates", docxHandler.GetAllTemplates)
 		v1.GET("/templates/:templateId/placeholders", docxHandler.GetPlaceholders)
-		v1.GET("/templates/:templateId/preview", docxHandler.GetHTMLPreview)
+		v1.GET("/templates/:templateId/preview", docxHandler.GetHTMLPreview)           // HTML preview (auto-generated from DOCX)
+		v1.GET("/templates/:templateId/preview/pdf", docxHandler.GetPDFPreview)        // PDF preview (auto-generated from DOCX)
+		v1.GET("/templates/:templateId/thumbnail", docxHandler.GetThumbnail)           // Thumbnail image (auto-generated from PDF)
 		v1.PUT("/templates/:templateId", docxHandler.UpdateTemplate)
 		v1.DELETE("/templates/:templateId", docxHandler.DeleteTemplate)
 		v1.POST("/templates/:templateId/files", docxHandler.ReplaceTemplateFiles)

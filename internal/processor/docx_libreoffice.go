@@ -429,3 +429,117 @@ func ConvertToPDFWithOrientation(inputDocx, outputPdf string, landscape bool) er
 	// The landscape parameter is kept for API compatibility
 	return ConvertToPDF(inputDocx, outputPdf)
 }
+
+// ConvertToHTML converts a DOCX file to HTML using LibreOffice
+// Returns the path to the generated HTML file
+func ConvertToHTML(inputDocx, outputDir string) (string, error) {
+	loPath := FindLibreOffice()
+	if loPath == "" {
+		return "", fmt.Errorf("LibreOffice not found on system")
+	}
+
+	return ConvertToHTMLWithPath(loPath, inputDocx, outputDir)
+}
+
+// ConvertToHTMLWithPath converts DOCX to HTML using specified LibreOffice path
+func ConvertToHTMLWithPath(loPath, inputDocx, outputDir string) (string, error) {
+	absInputPath, err := filepath.Abs(inputDocx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute input path: %w", err)
+	}
+
+	absOutDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute output dir: %w", err)
+	}
+	if err := os.MkdirAll(absOutDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Create unique user profile to avoid conflicts
+	profileDir := filepath.Join(os.TempDir(), fmt.Sprintf("lo_html_%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create profile directory: %w", err)
+	}
+	defer os.RemoveAll(profileDir)
+
+	// Convert to HTML using LibreOffice
+	// Using "html:HTML:EmbedImages" filter for embedded images in HTML
+	cmd := exec.Command(loPath,
+		"--headless",
+		"--invisible",
+		"--nofirststartwizard",
+		"--norestore",
+		"--convert-to", "html:HTML:EmbedImages",
+		"--outdir", absOutDir,
+		fmt.Sprintf("-env:UserInstallation=file://%s", profileDir),
+		absInputPath,
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	fmt.Printf("[DEBUG] Running LibreOffice HTML conversion: %s\n", cmd.String())
+
+	// Set timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return "", fmt.Errorf("LibreOffice HTML conversion failed: %v, stderr: %s", err, stderr.String())
+		}
+	case <-time.After(60 * time.Second):
+		cmd.Process.Kill()
+		return "", fmt.Errorf("LibreOffice HTML conversion timed out after 60 seconds")
+	}
+
+	// LibreOffice outputs with .html extension in outDir
+	baseName := filepath.Base(inputDocx)
+	// Remove .docx extension and add .html
+	htmlName := baseName
+	if len(htmlName) > 5 && htmlName[len(htmlName)-5:] == ".docx" {
+		htmlName = htmlName[:len(htmlName)-5] + ".html"
+	} else if len(htmlName) > 4 && htmlName[len(htmlName)-4:] == ".doc" {
+		htmlName = htmlName[:len(htmlName)-4] + ".html"
+	} else {
+		htmlName = htmlName + ".html"
+	}
+	outputPath := filepath.Join(absOutDir, htmlName)
+
+	// Verify output exists
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("HTML output file was not created")
+	}
+
+	fmt.Printf("[DEBUG] HTML conversion completed: %s\n", outputPath)
+	return outputPath, nil
+}
+
+// ConvertToHTMLBytes converts DOCX to HTML and returns the HTML content as bytes
+func ConvertToHTMLBytes(inputDocx string) ([]byte, error) {
+	// Create temp directory for output
+	tempDir, err := os.MkdirTemp("", "docx_html_*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Convert to HTML
+	htmlPath, err := ConvertToHTML(inputDocx, tempDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read the HTML content
+	content, err := os.ReadFile(htmlPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read HTML file: %w", err)
+	}
+
+	return content, nil
+}
