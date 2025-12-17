@@ -245,6 +245,9 @@ func main() {
 		v1.DELETE("/templates/:templateId", docxHandler.DeleteTemplate)
 		v1.POST("/templates/:templateId/files", docxHandler.ReplaceTemplateFiles)
 
+		// Thumbnail regeneration (for existing templates)
+		v1.POST("/templates/regenerate-thumbnails", docxHandler.RegenerateThumbnails)
+
 		// Field definitions (auto-detected from placeholders)
 		v1.GET("/templates/:templateId/field-definitions", docxHandler.GetFieldDefinitions)
 		v1.PUT("/templates/:templateId/field-definitions", docxHandler.UpdateFieldDefinitions)
