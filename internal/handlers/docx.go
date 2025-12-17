@@ -1117,3 +1117,43 @@ func (h *DocxHandler) RegenerateFieldDefinitions(c *gin.Context) {
 		"field_definitions": definitions,
 	})
 }
+
+// RegenerateThumbnails regenerates thumbnails for all templates missing them
+func (h *DocxHandler) RegenerateThumbnails(c *gin.Context) {
+	// Check if force regenerate is requested
+	forceRegenerate := c.Query("force") == "true"
+
+	// Optional: regenerate for a single template
+	templateID := c.Query("template_id")
+	if templateID != "" {
+		template, err := h.templateService.GetTemplate(templateID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Template not found: %v", err)})
+			return
+		}
+
+		thumbnailPath, err := h.templateService.GenerateThumbnailForTemplate(c.Request.Context(), template)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to generate thumbnail: %v", err)})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":        "Thumbnail generated successfully",
+			"template_id":    templateID,
+			"thumbnail_path": thumbnailPath,
+		})
+		return
+	}
+
+	// Regenerate for all templates
+	successCount, failCount, errors := h.templateService.RegenerateThumbnailsForAllTemplates(c.Request.Context(), forceRegenerate)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Thumbnail regeneration completed",
+		"success_count": successCount,
+		"fail_count":    failCount,
+		"errors":        errors,
+		"force":         forceRegenerate,
+	})
+}

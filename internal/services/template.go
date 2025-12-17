@@ -974,6 +974,109 @@ func (s *TemplateService) GenerateAndStorePDFPreview(ctx context.Context, templa
 	return pdfContent, pdfObjectName, nil
 }
 
+// GenerateThumbnailForTemplate generates a thumbnail for a single template from its PDF
+func (s *TemplateService) GenerateThumbnailForTemplate(ctx context.Context, template *models.Template) (string, error) {
+	if s.conversionService == nil || !s.conversionService.IsThumbnailGenerationAvailable() {
+		return "", fmt.Errorf("thumbnail generation is not available")
+	}
+
+	// If no PDF exists, generate it first
+	var pdfContent []byte
+	var err error
+
+	if template.GCSPathPDF == "" {
+		fmt.Printf("[INFO] Template %s has no PDF, generating PDF first...\n", template.ID)
+		pdfContent, _, err = s.GenerateAndStorePDFPreview(ctx, template)
+		if err != nil {
+			return "", fmt.Errorf("failed to generate PDF: %w", err)
+		}
+	} else {
+		// Read existing PDF
+		reader, err := s.storageClient.ReadFile(ctx, template.GCSPathPDF)
+		if err != nil {
+			return "", fmt.Errorf("failed to read PDF from storage: %w", err)
+		}
+		defer reader.Close()
+		pdfContent, err = io.ReadAll(reader)
+		if err != nil {
+			return "", fmt.Errorf("failed to read PDF content: %w", err)
+		}
+	}
+
+	// Create temp file for PDF
+	pdfTempFile, err := os.CreateTemp("", "*.pdf")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(pdfTempFile.Name())
+
+	if _, err := pdfTempFile.Write(pdfContent); err != nil {
+		pdfTempFile.Close()
+		return "", fmt.Errorf("failed to write temp PDF: %w", err)
+	}
+	pdfTempFile.Close()
+
+	// Generate thumbnail
+	thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDF(ctx, pdfTempFile.Name(), 300)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate thumbnail: %w", err)
+	}
+
+	// Upload thumbnail
+	thumbnailFileName := strings.TrimSuffix(template.Filename, filepath.Ext(template.Filename)) + "_thumb.png"
+	thumbnailObjectName := storage.GenerateObjectName(template.ID, thumbnailFileName)
+	thumbnailReader := bytes.NewReader(thumbnailContent)
+	_, err = s.storageClient.UploadFile(ctx, io.NopCloser(thumbnailReader), thumbnailObjectName, "image/png")
+	if err != nil {
+		return "", fmt.Errorf("failed to upload thumbnail: %w", err)
+	}
+
+	// Update template with thumbnail path
+	template.GCSPathThumbnail = thumbnailObjectName
+	if err := internal.DB.Save(template).Error; err != nil {
+		fmt.Printf("[WARNING] Failed to update template with thumbnail path: %v\n", err)
+	}
+
+	fmt.Printf("[INFO] Generated thumbnail for template %s at %s\n", template.ID, thumbnailObjectName)
+	return thumbnailObjectName, nil
+}
+
+// RegenerateThumbnailsForAllTemplates generates thumbnails for all templates missing them
+// Returns the number of successfully generated thumbnails and any errors
+func (s *TemplateService) RegenerateThumbnailsForAllTemplates(ctx context.Context, forceRegenerate bool) (int, int, []string) {
+	var templates []models.Template
+	query := internal.DB.Model(&models.Template{})
+
+	if !forceRegenerate {
+		// Only get templates without thumbnails
+		query = query.Where("gcs_path_thumbnail IS NULL OR gcs_path_thumbnail = ''")
+	}
+
+	if err := query.Find(&templates).Error; err != nil {
+		return 0, 0, []string{fmt.Sprintf("failed to get templates: %v", err)}
+	}
+
+	successCount := 0
+	failCount := 0
+	var errors []string
+
+	for _, template := range templates {
+		fmt.Printf("[INFO] Processing template %s (%s)...\n", template.ID, template.DisplayName)
+
+		_, err := s.GenerateThumbnailForTemplate(ctx, &template)
+		if err != nil {
+			failCount++
+			errMsg := fmt.Sprintf("Template %s (%s): %v", template.ID, template.DisplayName, err)
+			errors = append(errors, errMsg)
+			fmt.Printf("[ERROR] %s\n", errMsg)
+		} else {
+			successCount++
+		}
+	}
+
+	return successCount, failCount, errors
+}
+
 // UpdateFieldDefinitions updates the field definitions for a template
 func (s *TemplateService) UpdateFieldDefinitions(templateID string, fieldDefinitions map[string]utils.FieldDefinition) (*models.Template, error) {
 	template, err := s.GetTemplate(templateID)
