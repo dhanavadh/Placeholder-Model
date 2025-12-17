@@ -21,12 +21,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app/server ./cmd
 
 # ---
 
-# Use Debian for LibreOffice support (PDF conversion)
+# Use Debian slim for runtime
 FROM debian:bookworm-slim
 
-# Install LibreOffice Writer and Thai fonts for PDF conversion
+# Install poppler-utils (for thumbnail generation) and Thai fonts
+# LibreOffice conversion is handled by external dooform-libreoffice-service
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libreoffice-writer \
+    poppler-utils \
     fonts-thai-tlwg \
     fonts-noto-cjk \
     ca-certificates \
@@ -38,9 +39,6 @@ WORKDIR /app
 
 # Copy the Pre-built binary file from the previous stage
 COPY --from=builder /app/server .
-
-# Enable LibreOffice for PDF conversion
-ENV LIBREOFFICE_ENABLED=true
 
 # Expose port 8081 to the outside world
 EXPOSE 8081
