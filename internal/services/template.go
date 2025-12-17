@@ -413,13 +413,15 @@ func (s *TemplateService) GetAllTemplates() ([]models.Template, error) {
 
 // TemplateFilter represents filter options for querying templates
 type TemplateFilter struct {
-	DocumentTypeID string // Filter by document type ID
-	Type           string // Filter by template type (official, private, community)
-	Tier           string // Filter by tier (free, basic, premium, enterprise)
-	Category       string // Filter by category
-	IsVerified     *bool  // Filter by verification status
-	Search         string // Search in name, description, author
-	IncludeDocumentType bool // Whether to preload document type
+	DocumentTypeID      string // Filter by document type ID
+	Type                string // Filter by template type (official, private, community)
+	Tier                string // Filter by tier (free, basic, premium, enterprise)
+	Category            string // Filter by category
+	IsVerified          *bool  // Filter by verification status
+	Search              string // Search in name, description, author
+	IncludeDocumentType bool   // Whether to preload document type
+	Sort                string // Sort order: "popular" (by usage), "recent" (by created_at), "name" (alphabetical)
+	Limit               int    // Limit number of results (0 = no limit)
 }
 
 // GetTemplatesWithFilter retrieves templates with filtering options
@@ -453,8 +455,27 @@ func (s *TemplateService) GetTemplatesWithFilter(filter *TemplateFilter) ([]mode
 		query = query.Preload("DocumentType")
 	}
 
-	// Order by variant_order within document type, then by created_at
-	query = query.Order("document_type_id ASC, variant_order ASC, created_at DESC")
+	// Apply sorting
+	switch filter.Sort {
+	case "popular":
+		// Sort by actual document count - most used first
+		// Uses documents table which has real records of generated documents
+		query = query.
+			Joins("LEFT JOIN (SELECT template_id, COUNT(*) as doc_count FROM documents WHERE deleted_at IS NULL GROUP BY template_id) doc_counts ON doc_counts.template_id = id").
+			Order("COALESCE(doc_counts.doc_count, 0) DESC, created_at DESC")
+	case "name":
+		query = query.Order("COALESCE(NULLIF(display_name, ''), filename) ASC")
+	case "recent":
+		query = query.Order("created_at DESC")
+	default:
+		// Default: order by variant_order within document type, then by created_at
+		query = query.Order("document_type_id ASC, variant_order ASC, created_at DESC")
+	}
+
+	// Apply limit if specified
+	if filter.Limit > 0 {
+		query = query.Limit(filter.Limit)
+	}
 
 	if err := query.Find(&templates).Error; err != nil {
 		return nil, fmt.Errorf("failed to get templates: %w", err)

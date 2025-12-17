@@ -220,6 +220,8 @@ func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
 	isVerifiedStr := c.Query("is_verified")
 	includeDocumentType := c.Query("include_document_type") == "true"
 	grouped := c.Query("grouped") == "true"
+	sort := c.Query("sort")       // "popular", "recent", "name"
+	limitStr := c.Query("limit")  // Limit number of results
 
 	// If grouped view is requested, return templates grouped by document type
 	if grouped {
@@ -236,8 +238,14 @@ func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
 		return
 	}
 
-	// If any filter is specified, use filtered query
-	if documentTypeID != "" || templateType != "" || tier != "" || category != "" || search != "" || isVerifiedStr != "" || includeDocumentType {
+	// Parse limit
+	var limit int
+	if limitStr != "" {
+		fmt.Sscanf(limitStr, "%d", &limit)
+	}
+
+	// If any filter/sort is specified, use filtered query
+	if documentTypeID != "" || templateType != "" || tier != "" || category != "" || search != "" || isVerifiedStr != "" || includeDocumentType || sort != "" || limit > 0 {
 		filter := &services.TemplateFilter{
 			DocumentTypeID:      documentTypeID,
 			Type:                templateType,
@@ -245,6 +253,8 @@ func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
 			Category:            category,
 			Search:              search,
 			IncludeDocumentType: includeDocumentType,
+			Sort:                sort,
+			Limit:               limit,
 		}
 
 		// Parse is_verified boolean
