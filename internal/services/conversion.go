@@ -8,7 +8,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 )
@@ -220,91 +219,67 @@ func (s *ConversionService) Close() error {
 }
 
 // GenerateThumbnailFromPDF generates a PNG thumbnail from the first page of a PDF
-// Uses pdftoppm (poppler-utils) or ImageMagick convert as fallback
+// Uses remote LibreOffice service
 func (s *ConversionService) GenerateThumbnailFromPDF(ctx context.Context, pdfPath string, width int) ([]byte, error) {
-	// Create temp directory for output
-	tempDir, err := os.MkdirTemp("", "pdf_thumbnail_*")
+	if !s.available {
+		return nil, fmt.Errorf("LibreOffice service is not available")
+	}
+
+	// Read the PDF file
+	pdfContent, err := os.ReadFile(pdfPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	outputBase := filepath.Join(tempDir, "thumb")
-	var outputPath string
-
-	// Try pdftoppm first (usually better quality and faster)
-	if pdftoppmPath, err := exec.LookPath("pdftoppm"); err == nil {
-		// pdftoppm generates files like thumb-1.png for first page
-		cmd := exec.CommandContext(ctx, pdftoppmPath,
-			"-png",                             // Output PNG format
-			"-f", "1",                          // First page
-			"-l", "1",                          // Last page (same as first = only first page)
-			"-scale-to", fmt.Sprintf("%d", width), // Scale to width
-			pdfPath,
-			outputBase,
-		)
-		if err := cmd.Run(); err == nil {
-			outputPath = outputBase + "-1.png"
-			if _, err := os.Stat(outputPath); err == nil {
-				content, err := os.ReadFile(outputPath)
-				if err != nil {
-					return nil, fmt.Errorf("failed to read thumbnail: %w", err)
-				}
-				return content, nil
-			}
-		}
+		return nil, fmt.Errorf("failed to read PDF file: %w", err)
 	}
 
-	// Fallback to ImageMagick convert
-	if convertPath, err := exec.LookPath("convert"); err == nil {
-		outputPath = filepath.Join(tempDir, "thumb.png")
-		cmd := exec.CommandContext(ctx, convertPath,
-			"-density", "150",                       // DPI for rendering
-			"-background", "white",                  // White background
-			"-alpha", "remove",                      // Remove alpha channel
-			"-resize", fmt.Sprintf("%dx", width),    // Resize to width
-			pdfPath+"[0]",                           // First page only
-			outputPath,
-		)
-		if err := cmd.Run(); err == nil {
-			content, err := os.ReadFile(outputPath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read thumbnail: %w", err)
-			}
-			return content, nil
-		}
+	return s.GenerateThumbnailFromPDFBytes(ctx, pdfContent, filepath.Base(pdfPath), width)
+}
+
+// GenerateThumbnailFromPDFBytes generates thumbnail from PDF bytes
+func (s *ConversionService) GenerateThumbnailFromPDFBytes(ctx context.Context, pdfContent []byte, filename string, width int) ([]byte, error) {
+	if !s.available {
+		return nil, fmt.Errorf("LibreOffice service is not available")
 	}
 
-	// Fallback to sips on macOS
-	if sipsPath, err := exec.LookPath("sips"); err == nil {
-		outputPath = filepath.Join(tempDir, "thumb.png")
-		cmd := exec.CommandContext(ctx, sipsPath,
-			"-s", "format", "png",
-			"-Z", fmt.Sprintf("%d", width),
-			pdfPath,
-			"--out", outputPath,
-		)
-		if err := cmd.Run(); err == nil {
-			content, err := os.ReadFile(outputPath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read thumbnail: %w", err)
-			}
-			return content, nil
-		}
+	// Create multipart form
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	part, err := writer.CreateFormFile("files", filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create form file: %w", err)
 	}
 
-	return nil, fmt.Errorf("no PDF to image converter available (tried pdftoppm, convert, sips)")
+	if _, err := part.Write(pdfContent); err != nil {
+		return nil, fmt.Errorf("failed to write file content: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	// Make request to LibreOffice service thumbnail endpoint
+	url := fmt.Sprintf("%s/forms/libreoffice/thumbnail?width=%d", s.serviceURL, width)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call LibreOffice service: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("LibreOffice service returned error: %s - %s", resp.Status, string(bodyBytes))
+	}
+
+	return io.ReadAll(resp.Body)
 }
 
 // IsThumbnailGenerationAvailable checks if thumbnail generation is available
 func (s *ConversionService) IsThumbnailGenerationAvailable() bool {
-	// Check for pdftoppm
-	if _, err := exec.LookPath("pdftoppm"); err == nil {
-		return true
-	}
-	// Check for ImageMagick convert
-	if _, err := exec.LookPath("convert"); err == nil {
-		return true
-	}
-	return false
+	return s.available
 }

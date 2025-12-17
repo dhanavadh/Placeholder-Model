@@ -21,18 +21,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app/server ./cmd
 
 # ---
 
-# Use Debian slim for runtime
-FROM debian:bookworm-slim
+# Use Alpine for minimal runtime (all conversions handled by dooform-libreoffice-service)
+FROM alpine:latest
 
-# Install poppler-utils (for thumbnail generation) and Thai fonts
-# LibreOffice conversion is handled by external dooform-libreoffice-service
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils \
-    fonts-thai-tlwg \
-    fonts-noto-cjk \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /var/cache/apt/*
+# Install CA certificates for HTTPS calls to LibreOffice service
+RUN apk --no-cache add ca-certificates
 
 # Set the Current Working Directory inside the container
 WORKDIR /app
