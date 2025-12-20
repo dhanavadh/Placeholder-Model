@@ -305,7 +305,7 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 						pdfTempFile.Close()
 						defer os.Remove(pdfTempFile.Name())
 
-						thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDF(ctx, pdfTempFile.Name(), 300)
+						thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDFWithQuality(ctx, pdfTempFile.Name(), 600, ThumbnailQualityHD)
 						if err != nil {
 							fmt.Printf("[WARNING] Failed to generate thumbnail: %v\n", err)
 						} else {
@@ -721,7 +721,7 @@ func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID s
 							pdfTempFile.Close()
 							defer os.Remove(pdfTempFile.Name())
 
-							thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDF(ctx, pdfTempFile.Name(), 300)
+							thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDFWithQuality(ctx, pdfTempFile.Name(), 600, ThumbnailQualityHD)
 							if err != nil {
 								fmt.Printf("[WARNING] Failed to generate thumbnail: %v\n", err)
 							} else {
@@ -1016,8 +1016,8 @@ func (s *TemplateService) GenerateThumbnailForTemplate(ctx context.Context, temp
 	}
 	pdfTempFile.Close()
 
-	// Generate thumbnail
-	thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDF(ctx, pdfTempFile.Name(), 300)
+	// Generate HD thumbnail for better quality on detail pages
+	thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDFWithQuality(ctx, pdfTempFile.Name(), 600, ThumbnailQualityHD)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate thumbnail: %w", err)
 	}
