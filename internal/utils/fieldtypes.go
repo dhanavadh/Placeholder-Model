@@ -55,6 +55,7 @@ const (
 	InputTypeTextarea InputType = "textarea"
 	InputTypeCheckbox InputType = "checkbox"
 	InputTypeMerged   InputType = "merged"
+	InputTypeRadio    InputType = "radio"
 )
 
 // FieldValidation contains validation rules for a field
@@ -66,6 +67,13 @@ type FieldValidation struct {
 	Max       *int     `json:"max,omitempty"`
 	Options   []string `json:"options,omitempty"`
 	Required  bool     `json:"required,omitempty"`
+}
+
+// RadioOption represents an option in a radio button group
+type RadioOption struct {
+	Placeholder string `json:"placeholder"` // The placeholder key (e.g., "$1", "$2")
+	Label       string `json:"label"`       // Display label (e.g., "Male", "Female")
+	Value       string `json:"value"`       // Value when selected (e.g., "/")
 }
 
 // FieldDefinition represents the complete definition of a field
@@ -86,6 +94,10 @@ type FieldDefinition struct {
 	MergedFields []string         `json:"mergedFields,omitempty"` // List of original placeholder keys that are merged
 	Separator    string           `json:"separator,omitempty"`    // Separator to use when splitting the merged value
 	MergePattern string           `json:"mergePattern,omitempty"` // Pattern used to detect merge (e.g., "$1-$13")
+	// Radio group properties (for mutually exclusive checkbox groups like Male/Female)
+	IsRadioGroup  bool          `json:"isRadioGroup,omitempty"`  // Whether this field is a radio group master
+	RadioGroupId  string        `json:"radioGroupId,omitempty"`  // Unique identifier for the radio group
+	RadioOptions  []RadioOption `json:"radioOptions,omitempty"`  // List of radio options with their placeholders
 }
 
 // Thai name prefixes
