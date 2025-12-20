@@ -140,6 +140,8 @@ func main() {
 	} else {
 		docxHandler.SetStorageInfo(cfg.GCS.BucketName)
 	}
+	// Set base URL for generating public API URLs
+	docxHandler.SetBaseURL(cfg.Server.BaseURL)
 	logsHandler := handlers.NewLogsHandler(activityLogService)
 	fieldRuleHandler := handlers.NewFieldRuleHandler(fieldRuleService)
 	entityRuleHandler := handlers.NewEntityRuleHandler(entityRuleService)

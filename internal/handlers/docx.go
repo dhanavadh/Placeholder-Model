@@ -24,6 +24,7 @@ type DocxHandler struct {
 	documentService   *services.DocumentService
 	statisticsService *services.StatisticsService
 	storageInfo       string // Storage identifier (bucket name for GCS, path for local)
+	baseURL           string // Base URL for generating public URLs
 }
 
 func NewDocxHandler(templateService *services.TemplateService, documentService *services.DocumentService, statisticsService *services.StatisticsService) *DocxHandler {
@@ -39,12 +40,13 @@ func (h *DocxHandler) SetStorageInfo(info string) {
 	h.storageInfo = info
 }
 
-type PlaceholderResponse struct {
-	Placeholders []string `json:"placeholders"`
+// SetBaseURL sets the base URL for generating public API URLs
+func (h *DocxHandler) SetBaseURL(url string) {
+	h.baseURL = url
 }
 
-type TemplatesResponse struct {
-	Templates []models.Template `json:"templates"`
+type PlaceholderResponse struct {
+	Placeholders []string `json:"placeholders"`
 }
 
 type ProcessRequest struct {
@@ -269,8 +271,11 @@ func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"templates": templates,
+		// Convert to clean DTO format for public API
+		templateItems := models.ToListItems(templates, h.baseURL)
+		c.JSON(http.StatusOK, models.TemplateListResponse{
+			Templates: templateItems,
+			Total:     len(templateItems),
 		})
 		return
 	}
@@ -282,11 +287,12 @@ func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
 		return
 	}
 
-	response := TemplatesResponse{
-		Templates: templates,
-	}
-
-	c.JSON(http.StatusOK, response)
+	// Convert to clean DTO format for public API
+	templateItems := models.ToListItems(templates, h.baseURL)
+	c.JSON(http.StatusOK, models.TemplateListResponse{
+		Templates: templateItems,
+		Total:     len(templateItems),
+	})
 }
 
 func (h *DocxHandler) GetPlaceholders(c *gin.Context) {
