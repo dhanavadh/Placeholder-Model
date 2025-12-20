@@ -1041,6 +1041,51 @@ func (s *TemplateService) GenerateThumbnailForTemplate(ctx context.Context, temp
 	return thumbnailObjectName, nil
 }
 
+// GenerateHDThumbnail generates a high-definition thumbnail on-demand for a template
+// This is used for the detail page where pixel-perfect rendering is needed
+func (s *TemplateService) GenerateHDThumbnail(ctx context.Context, template *models.Template, width int) ([]byte, error) {
+	if s.conversionService == nil || !s.conversionService.IsThumbnailGenerationAvailable() {
+		return nil, fmt.Errorf("thumbnail generation is not available")
+	}
+
+	// Read PDF from storage
+	if template.GCSPathPDF == "" {
+		return nil, fmt.Errorf("PDF not found for template %s", template.ID)
+	}
+
+	reader, err := s.storageClient.ReadFile(ctx, template.GCSPathPDF)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PDF from storage: %w", err)
+	}
+	defer reader.Close()
+
+	pdfContent, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PDF content: %w", err)
+	}
+
+	// Create temp file for PDF
+	pdfTempFile, err := os.CreateTemp("", "*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(pdfTempFile.Name())
+
+	if _, err := pdfTempFile.Write(pdfContent); err != nil {
+		pdfTempFile.Close()
+		return nil, fmt.Errorf("failed to write temp PDF: %w", err)
+	}
+	pdfTempFile.Close()
+
+	// Generate HD thumbnail using the HD quality setting
+	thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDFWithQuality(ctx, pdfTempFile.Name(), width, ThumbnailQualityHD)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate HD thumbnail: %w", err)
+	}
+
+	return thumbnailContent, nil
+}
+
 // RegenerateThumbnailsForAllTemplates generates thumbnails for all templates missing them
 // Returns the number of successfully generated thumbnails and any errors
 func (s *TemplateService) RegenerateThumbnailsForAllTemplates(ctx context.Context, forceRegenerate bool) (int, int, []string) {

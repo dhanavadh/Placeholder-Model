@@ -394,6 +394,9 @@ func (h *DocxHandler) GetPDFPreview(c *gin.Context) {
 }
 
 // GetThumbnail returns the thumbnail image for a template
+// Query params:
+//   - quality: "normal" (default) or "hd" for pixel-perfect rendering
+//   - width: pixel width (default 300 for normal, 800 for HD)
 func (h *DocxHandler) GetThumbnail(c *gin.Context) {
 	templateID := c.Param("templateId")
 	if templateID == "" {
@@ -407,7 +410,45 @@ func (h *DocxHandler) GetThumbnail(c *gin.Context) {
 		return
 	}
 
-	// Check if thumbnail exists
+	// Get quality parameter
+	quality := c.DefaultQuery("quality", "normal")
+
+	// For HD quality, generate on-demand from PDF
+	if quality == "hd" {
+		// Check if PDF exists
+		if template.GCSPathPDF == "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "PDF not found for HD thumbnail generation"})
+			return
+		}
+
+		// Get width parameter (default 800 for HD)
+		width := 800
+		if widthStr := c.Query("width"); widthStr != "" {
+			if w, err := strconv.Atoi(widthStr); err == nil && w > 0 {
+				width = w
+			}
+		}
+
+		// Generate HD thumbnail on-demand
+		thumbnailData, err := h.templateService.GenerateHDThumbnail(c.Request.Context(), template, width)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to generate HD thumbnail: %v", err)})
+			return
+		}
+
+		// Set headers for PNG image
+		filename := strings.TrimSuffix(template.Filename, filepath.Ext(template.Filename)) + "_thumb_hd.png"
+		c.Header("Content-Type", "image/png")
+		c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%s", filename))
+		c.Header("Cache-Control", "public, max-age=3600") // Cache HD for 1 hour
+		c.Header("X-Thumbnail-Quality", "hd")
+		c.Header("X-Thumbnail-Width", strconv.Itoa(width))
+
+		c.Data(http.StatusOK, "image/png", thumbnailData)
+		return
+	}
+
+	// Normal quality - use pre-generated thumbnail
 	if template.GCSPathThumbnail == "" {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Thumbnail not found for this template"})
 		return
@@ -426,6 +467,7 @@ func (h *DocxHandler) GetThumbnail(c *gin.Context) {
 	c.Header("Content-Type", "image/png")
 	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%s", filename))
 	c.Header("Cache-Control", "public, max-age=86400") // Cache for 24 hours
+	c.Header("X-Thumbnail-Quality", "normal")
 
 	// Stream the thumbnail to the client
 	io.Copy(c.Writer, reader)

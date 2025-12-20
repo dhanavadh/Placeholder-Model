@@ -218,9 +218,24 @@ func (s *ConversionService) Close() error {
 	return nil
 }
 
+// ThumbnailQuality represents the quality level for thumbnail generation
+type ThumbnailQuality string
+
+const (
+	// ThumbnailQualityNormal is the default thumbnail quality (faster, smaller)
+	ThumbnailQualityNormal ThumbnailQuality = "normal"
+	// ThumbnailQualityHD is high-definition thumbnail quality (pixel-perfect, larger)
+	ThumbnailQualityHD ThumbnailQuality = "hd"
+)
+
 // GenerateThumbnailFromPDF generates a PNG thumbnail from the first page of a PDF
 // Uses remote LibreOffice service
 func (s *ConversionService) GenerateThumbnailFromPDF(ctx context.Context, pdfPath string, width int) ([]byte, error) {
+	return s.GenerateThumbnailFromPDFWithQuality(ctx, pdfPath, width, ThumbnailQualityNormal)
+}
+
+// GenerateThumbnailFromPDFWithQuality generates a PNG thumbnail with specified quality
+func (s *ConversionService) GenerateThumbnailFromPDFWithQuality(ctx context.Context, pdfPath string, width int, quality ThumbnailQuality) ([]byte, error) {
 	if !s.available {
 		return nil, fmt.Errorf("LibreOffice service is not available")
 	}
@@ -231,11 +246,16 @@ func (s *ConversionService) GenerateThumbnailFromPDF(ctx context.Context, pdfPat
 		return nil, fmt.Errorf("failed to read PDF file: %w", err)
 	}
 
-	return s.GenerateThumbnailFromPDFBytes(ctx, pdfContent, filepath.Base(pdfPath), width)
+	return s.GenerateThumbnailFromPDFBytesWithQuality(ctx, pdfContent, filepath.Base(pdfPath), width, quality)
 }
 
-// GenerateThumbnailFromPDFBytes generates thumbnail from PDF bytes
+// GenerateThumbnailFromPDFBytes generates thumbnail from PDF bytes (normal quality)
 func (s *ConversionService) GenerateThumbnailFromPDFBytes(ctx context.Context, pdfContent []byte, filename string, width int) ([]byte, error) {
+	return s.GenerateThumbnailFromPDFBytesWithQuality(ctx, pdfContent, filename, width, ThumbnailQualityNormal)
+}
+
+// GenerateThumbnailFromPDFBytesWithQuality generates thumbnail from PDF bytes with specified quality
+func (s *ConversionService) GenerateThumbnailFromPDFBytesWithQuality(ctx context.Context, pdfContent []byte, filename string, width int, quality ThumbnailQuality) ([]byte, error) {
 	if !s.available {
 		return nil, fmt.Errorf("LibreOffice service is not available")
 	}
@@ -257,8 +277,8 @@ func (s *ConversionService) GenerateThumbnailFromPDFBytes(ctx context.Context, p
 		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	// Make request to LibreOffice service thumbnail endpoint
-	url := fmt.Sprintf("%s/forms/libreoffice/thumbnail?width=%d", s.serviceURL, width)
+	// Make request to LibreOffice service thumbnail endpoint with quality parameter
+	url := fmt.Sprintf("%s/forms/libreoffice/thumbnail?width=%d&quality=%s", s.serviceURL, width, quality)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
