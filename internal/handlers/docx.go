@@ -233,9 +233,10 @@ func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"document_types":    documentTypes,
-			"orphan_templates": orphanTemplates,
+		// Convert to clean response format
+		c.JSON(http.StatusOK, models.GroupedTemplatesResponse{
+			DocumentTypes:   models.ToResponseListDocTypes(documentTypes),
+			OrphanTemplates: models.ToResponseList(orphanTemplates),
 		})
 		return
 	}
@@ -271,11 +272,9 @@ func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
 			return
 		}
 
-		// Convert to clean DTO format for public API
-		templateItems := models.ToListItems(templates, h.baseURL)
+		// Convert to clean response format
 		c.JSON(http.StatusOK, models.TemplateListResponse{
-			Templates: templateItems,
-			Total:     len(templateItems),
+			Templates: models.ToResponseList(templates),
 		})
 		return
 	}
@@ -287,11 +286,9 @@ func (h *DocxHandler) GetAllTemplates(c *gin.Context) {
 		return
 	}
 
-	// Convert to clean DTO format for public API
-	templateItems := models.ToListItems(templates, h.baseURL)
+	// Convert to clean response format
 	c.JSON(http.StatusOK, models.TemplateListResponse{
-		Templates: templateItems,
-		Total:     len(templateItems),
+		Templates: models.ToResponseList(templates),
 	})
 }
 
