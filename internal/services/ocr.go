@@ -2590,14 +2590,35 @@ func (s *OCRService) SuggestFieldTypesWithDataTypes(placeholders []string, conte
 	}
 
 	content := chatResp.Choices[0].Message.Content
+	fmt.Printf("[Typhoon FieldType] Raw AI response length: %d bytes\n", len(content))
+
+	// Check for empty response
+	if content == "" {
+		fmt.Printf("[Typhoon FieldType] AI returned empty response\n")
+		return nil, fmt.Errorf("AI returned empty response - check API key and quota")
+	}
+
 	content = strings.TrimPrefix(content, "```json")
 	content = strings.TrimPrefix(content, "```")
 	content = strings.TrimSuffix(content, "```")
 	content = strings.TrimSpace(content)
 
+	// Check for empty after trimming
+	if content == "" {
+		fmt.Printf("[Typhoon FieldType] AI response was only markdown code blocks\n")
+		return nil, fmt.Errorf("AI returned empty content after parsing")
+	}
+
+	// Log first 500 chars for debugging
+	logContent := content
+	if len(logContent) > 500 {
+		logContent = logContent[:500] + "..."
+	}
+	fmt.Printf("[Typhoon FieldType] Cleaned response preview: %s\n", logContent)
+
 	var result FieldTypeSuggestionResult
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		fmt.Printf("[Typhoon FieldType] Failed to parse response: %s\n", content)
+		fmt.Printf("[Typhoon FieldType] Failed to parse response (length=%d): %s\n", len(content), content)
 		return nil, fmt.Errorf("failed to parse AI response: %w", err)
 	}
 
