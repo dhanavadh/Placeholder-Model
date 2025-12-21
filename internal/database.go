@@ -120,6 +120,7 @@ func autoMigrate() error {
 		"type":              "ALTER TABLE document_templates ADD COLUMN type varchar(20)",
 		"tier":              "ALTER TABLE document_templates ADD COLUMN tier varchar(20)",
 		"group":             "ALTER TABLE document_templates ADD COLUMN \"group\" text",
+		"page_orientation":  "ALTER TABLE document_templates ADD COLUMN page_orientation varchar(20) DEFAULT 'portrait'",
 		"created_at":        "ALTER TABLE document_templates ADD COLUMN created_at timestamp(3) NULL",
 		"updated_at":        "ALTER TABLE document_templates ADD COLUMN updated_at timestamp(3) NULL",
 		"deleted_at":        "ALTER TABLE document_templates ADD COLUMN deleted_at timestamp(3) NULL",

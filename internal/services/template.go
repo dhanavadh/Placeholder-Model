@@ -252,18 +252,39 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 			return nil, fmt.Errorf("failed to upload HTML preview to GCS: %w", err)
 		}
 		fmt.Printf("[INFO] Uploaded user-provided HTML preview for template %s\n", templateID)
-	} else if s.conversionService != nil && s.conversionService.IsHTMLConversionAvailable() {
+	} else {
 		// Auto-generate HTML preview from DOCX
-		fmt.Printf("[INFO] Auto-generating HTML preview for template %s\n", templateID)
-		htmlContent, err := s.conversionService.ConvertDocxToHTML(ctx, tempFile)
-		if err != nil {
-			// Log warning but don't fail - HTML preview is optional
-			fmt.Printf("[WARNING] Failed to auto-generate HTML preview: %v\n", err)
-		} else {
-			// Upload generated HTML
+		var htmlContent []byte
+		var htmlGenErr error
+		htmlGenerated := false
+
+		// Try remote service (Gotenberg) first if available
+		if s.conversionService != nil && s.conversionService.IsHTMLConversionAvailable() {
+			fmt.Printf("[INFO] Auto-generating HTML preview for template %s using remote service\n", templateID)
+			htmlContent, htmlGenErr = s.conversionService.ConvertDocxToHTML(ctx, tempFile)
+			if htmlGenErr != nil {
+				fmt.Printf("[WARNING] Failed to auto-generate HTML preview via remote service: %v\n", htmlGenErr)
+			} else {
+				htmlGenerated = true
+			}
+		}
+
+		// Fallback to local LibreOffice if remote failed or not available
+		if !htmlGenerated && processor.IsLibreOfficeAvailable() {
+			fmt.Printf("[INFO] Auto-generating HTML preview for template %s using local LibreOffice\n", templateID)
+			htmlContent, htmlGenErr = processor.ConvertToHTMLBytes(tempFile)
+			if htmlGenErr != nil {
+				fmt.Printf("[WARNING] Failed to auto-generate HTML preview via local LibreOffice: %v\n", htmlGenErr)
+			} else {
+				htmlGenerated = true
+			}
+		}
+
+		// Upload generated HTML if successful
+		if htmlGenerated && len(htmlContent) > 0 {
 			htmlFileName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".html"
 			htmlObjectName = storage.GenerateObjectName(templateID, htmlFileName)
-			htmlReader := strings.NewReader(string(htmlContent))
+			htmlReader := bytes.NewReader(htmlContent)
 			_, err := s.storageClient.UploadFile(ctx, io.NopCloser(htmlReader), htmlObjectName, "text/html")
 			if err != nil {
 				fmt.Printf("[WARNING] Failed to upload auto-generated HTML preview: %v\n", err)
@@ -277,51 +298,93 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 	// Auto-generate PDF preview and thumbnail
 	var pdfObjectName string
 	var thumbnailObjectName string
+	var pdfContent []byte
+	pdfGenerated := false
+
+	// Try remote service (Gotenberg) first if available
 	if s.conversionService != nil && s.conversionService.IsPDFConversionAvailable() {
-		fmt.Printf("[INFO] Auto-generating PDF preview for template %s\n", templateID)
-		pdfContent, err := s.conversionService.ConvertDocxToPDF(ctx, tempFile)
-		if err != nil {
-			// Log warning but don't fail - PDF preview is optional
-			fmt.Printf("[WARNING] Failed to auto-generate PDF preview: %v\n", err)
+		fmt.Printf("[INFO] Auto-generating PDF preview for template %s using remote service\n", templateID)
+		var pdfErr error
+		pdfContent, pdfErr = s.conversionService.ConvertDocxToPDF(ctx, tempFile)
+		if pdfErr != nil {
+			fmt.Printf("[WARNING] Failed to auto-generate PDF preview via remote service: %v\n", pdfErr)
 		} else {
-			// Upload generated PDF
-			pdfFileName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
-			pdfObjectName = storage.GenerateObjectName(templateID, pdfFileName)
-			pdfReader := bytes.NewReader(pdfContent)
-			_, err := s.storageClient.UploadFile(ctx, io.NopCloser(pdfReader), pdfObjectName, "application/pdf")
+			pdfGenerated = true
+		}
+	}
+
+	// Fallback to local LibreOffice if remote failed or not available
+	if !pdfGenerated && processor.IsLibreOfficeAvailable() {
+		fmt.Printf("[INFO] Auto-generating PDF preview for template %s using local LibreOffice\n", templateID)
+
+		// Create temp output file for PDF
+		pdfTempFile, err := os.CreateTemp("", "*.pdf")
+		if err != nil {
+			fmt.Printf("[WARNING] Failed to create temp PDF file: %v\n", err)
+		} else {
+			pdfTempPath := pdfTempFile.Name()
+			pdfTempFile.Close()
+			defer os.Remove(pdfTempPath)
+
+			err = processor.ConvertToPDF(tempFile, pdfTempPath)
 			if err != nil {
-				fmt.Printf("[WARNING] Failed to upload auto-generated PDF preview: %v\n", err)
-				pdfObjectName = "" // Reset on failure
+				fmt.Printf("[WARNING] Failed to auto-generate PDF preview via local LibreOffice: %v\n", err)
 			} else {
-				fmt.Printf("[INFO] Successfully auto-generated PDF preview for template %s\n", templateID)
+				// Read the generated PDF
+				pdfContent, err = os.ReadFile(pdfTempPath)
+				if err != nil {
+					fmt.Printf("[WARNING] Failed to read generated PDF: %v\n", err)
+				} else {
+					pdfGenerated = true
+				}
+			}
+		}
+	}
 
-				// Generate thumbnail from PDF
-				if s.conversionService.IsThumbnailGenerationAvailable() {
-					fmt.Printf("[INFO] Generating thumbnail for template %s\n", templateID)
-					// Create temp PDF file for thumbnail generation
-					pdfTempFile, err := os.CreateTemp("", "*.pdf")
-					if err == nil {
-						pdfTempFile.Write(pdfContent)
-						pdfTempFile.Close()
-						defer os.Remove(pdfTempFile.Name())
+	// Upload generated PDF if successful
+	if pdfGenerated && len(pdfContent) > 0 {
+		pdfFileName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + ".pdf"
+		pdfObjectName = storage.GenerateObjectName(templateID, pdfFileName)
+		pdfReader := bytes.NewReader(pdfContent)
+		_, err := s.storageClient.UploadFile(ctx, io.NopCloser(pdfReader), pdfObjectName, "application/pdf")
+		if err != nil {
+			fmt.Printf("[WARNING] Failed to upload auto-generated PDF preview: %v\n", err)
+			pdfObjectName = "" // Reset on failure
+		} else {
+			fmt.Printf("[INFO] Successfully auto-generated PDF preview for template %s\n", templateID)
 
-						thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDFWithQuality(ctx, pdfTempFile.Name(), 600, ThumbnailQualityHD)
-						if err != nil {
-							fmt.Printf("[WARNING] Failed to generate thumbnail: %v\n", err)
-						} else {
-							// Upload thumbnail
-							thumbnailFileName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + "_thumb.png"
-							thumbnailObjectName = storage.GenerateObjectName(templateID, thumbnailFileName)
-							thumbnailReader := bytes.NewReader(thumbnailContent)
-							_, err := s.storageClient.UploadFile(ctx, io.NopCloser(thumbnailReader), thumbnailObjectName, "image/png")
-							if err != nil {
-								fmt.Printf("[WARNING] Failed to upload thumbnail: %v\n", err)
-								thumbnailObjectName = ""
-							} else {
-								fmt.Printf("[INFO] Successfully generated thumbnail for template %s\n", templateID)
-							}
-						}
+			// Generate thumbnail from PDF (try remote first, then local)
+			var thumbnailContent []byte
+			thumbnailGenerated := false
+
+			if s.conversionService != nil && s.conversionService.IsThumbnailGenerationAvailable() {
+				fmt.Printf("[INFO] Generating thumbnail for template %s using remote service\n", templateID)
+				pdfTempFile, err := os.CreateTemp("", "*.pdf")
+				if err == nil {
+					pdfTempFile.Write(pdfContent)
+					pdfTempFile.Close()
+					defer os.Remove(pdfTempFile.Name())
+
+					thumbnailContent, err = s.conversionService.GenerateThumbnailFromPDFWithQuality(ctx, pdfTempFile.Name(), 600, ThumbnailQualityHD)
+					if err != nil {
+						fmt.Printf("[WARNING] Failed to generate thumbnail via remote service: %v\n", err)
+					} else {
+						thumbnailGenerated = true
 					}
+				}
+			}
+
+			// Upload thumbnail if generated
+			if thumbnailGenerated && len(thumbnailContent) > 0 {
+				thumbnailFileName := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)) + "_thumb.png"
+				thumbnailObjectName = storage.GenerateObjectName(templateID, thumbnailFileName)
+				thumbnailReader := bytes.NewReader(thumbnailContent)
+				_, err := s.storageClient.UploadFile(ctx, io.NopCloser(thumbnailReader), thumbnailObjectName, "image/png")
+				if err != nil {
+					fmt.Printf("[WARNING] Failed to upload thumbnail: %v\n", err)
+					thumbnailObjectName = ""
+				} else {
+					fmt.Printf("[INFO] Successfully generated thumbnail for template %s\n", templateID)
 				}
 			}
 		}
@@ -670,12 +733,35 @@ func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID s
 		defer s.cleanupTempFile(tempFile)
 
 		// Auto-generate HTML preview from DOCX (unless user provides HTML file)
-		if htmlFile == nil && s.conversionService != nil && s.conversionService.IsHTMLConversionAvailable() {
-			fmt.Printf("[INFO] Auto-generating HTML preview for template %s\n", templateID)
-			htmlContent, err := s.conversionService.ConvertDocxToHTML(ctx, tempFile)
-			if err != nil {
-				fmt.Printf("[WARNING] Failed to auto-generate HTML preview: %v\n", err)
-			} else {
+		if htmlFile == nil {
+			var htmlContent []byte
+			var htmlGenErr error
+			htmlGenerated := false
+
+			// Try remote service (Gotenberg) first if available
+			if s.conversionService != nil && s.conversionService.IsHTMLConversionAvailable() {
+				fmt.Printf("[INFO] Auto-generating HTML preview for template %s using remote service\n", templateID)
+				htmlContent, htmlGenErr = s.conversionService.ConvertDocxToHTML(ctx, tempFile)
+				if htmlGenErr != nil {
+					fmt.Printf("[WARNING] Failed to auto-generate HTML preview via remote service: %v\n", htmlGenErr)
+				} else {
+					htmlGenerated = true
+				}
+			}
+
+			// Fallback to local LibreOffice if remote failed or not available
+			if !htmlGenerated && processor.IsLibreOfficeAvailable() {
+				fmt.Printf("[INFO] Auto-generating HTML preview for template %s using local LibreOffice\n", templateID)
+				htmlContent, htmlGenErr = processor.ConvertToHTMLBytes(tempFile)
+				if htmlGenErr != nil {
+					fmt.Printf("[WARNING] Failed to auto-generate HTML preview via local LibreOffice: %v\n", htmlGenErr)
+				} else {
+					htmlGenerated = true
+				}
+			}
+
+			// Upload generated HTML if successful
+			if htmlGenerated && len(htmlContent) > 0 {
 				// Delete old HTML file
 				if template.GCSPathHTML != "" {
 					if err := s.storageClient.DeleteFile(ctx, template.GCSPathHTML); err != nil {
@@ -686,7 +772,7 @@ func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID s
 				// Upload generated HTML
 				htmlFileName := strings.TrimSuffix(docxHeader.Filename, filepath.Ext(docxHeader.Filename)) + ".html"
 				htmlObjectName := storage.GenerateObjectName(templateID, htmlFileName)
-				htmlReader := strings.NewReader(string(htmlContent))
+				htmlReader := bytes.NewReader(htmlContent)
 				_, err := s.storageClient.UploadFile(ctx, io.NopCloser(htmlReader), htmlObjectName, "text/html")
 				if err != nil {
 					fmt.Printf("[WARNING] Failed to upload auto-generated HTML preview: %v\n", err)
@@ -698,64 +784,108 @@ func (s *TemplateService) ReplaceTemplateFiles(ctx context.Context, templateID s
 		}
 
 		// Auto-generate PDF preview and thumbnail from DOCX
+		var pdfContent []byte
+		pdfGenerated := false
+
+		// Try remote service (Gotenberg) first if available
 		if s.conversionService != nil && s.conversionService.IsPDFConversionAvailable() {
-			fmt.Printf("[INFO] Auto-generating PDF preview for template %s\n", templateID)
-			pdfContent, err := s.conversionService.ConvertDocxToPDF(ctx, tempFile)
-			if err != nil {
-				fmt.Printf("[WARNING] Failed to auto-generate PDF preview: %v\n", err)
+			fmt.Printf("[INFO] Auto-generating PDF preview for template %s using remote service\n", templateID)
+			var pdfErr error
+			pdfContent, pdfErr = s.conversionService.ConvertDocxToPDF(ctx, tempFile)
+			if pdfErr != nil {
+				fmt.Printf("[WARNING] Failed to auto-generate PDF preview via remote service: %v\n", pdfErr)
 			} else {
-				// Delete old PDF file
-				if template.GCSPathPDF != "" {
-					if err := s.storageClient.DeleteFile(ctx, template.GCSPathPDF); err != nil {
-						fmt.Printf("Warning: failed to delete old PDF file %s: %v\n", template.GCSPathPDF, err)
+				pdfGenerated = true
+			}
+		}
+
+		// Fallback to local LibreOffice if remote failed or not available
+		if !pdfGenerated && processor.IsLibreOfficeAvailable() {
+			fmt.Printf("[INFO] Auto-generating PDF preview for template %s using local LibreOffice\n", templateID)
+
+			// Create temp output file for PDF
+			pdfTempFile, err := os.CreateTemp("", "*.pdf")
+			if err != nil {
+				fmt.Printf("[WARNING] Failed to create temp PDF file: %v\n", err)
+			} else {
+				pdfTempPath := pdfTempFile.Name()
+				pdfTempFile.Close()
+				defer os.Remove(pdfTempPath)
+
+				err = processor.ConvertToPDF(tempFile, pdfTempPath)
+				if err != nil {
+					fmt.Printf("[WARNING] Failed to auto-generate PDF preview via local LibreOffice: %v\n", err)
+				} else {
+					pdfContent, err = os.ReadFile(pdfTempPath)
+					if err != nil {
+						fmt.Printf("[WARNING] Failed to read generated PDF: %v\n", err)
+					} else {
+						pdfGenerated = true
+					}
+				}
+			}
+		}
+
+		// Upload generated PDF if successful
+		if pdfGenerated && len(pdfContent) > 0 {
+			// Delete old PDF file
+			if template.GCSPathPDF != "" {
+				if err := s.storageClient.DeleteFile(ctx, template.GCSPathPDF); err != nil {
+					fmt.Printf("Warning: failed to delete old PDF file %s: %v\n", template.GCSPathPDF, err)
+				}
+			}
+
+			// Upload generated PDF
+			pdfFileName := strings.TrimSuffix(docxHeader.Filename, filepath.Ext(docxHeader.Filename)) + ".pdf"
+			pdfObjectName := storage.GenerateObjectName(templateID, pdfFileName)
+			pdfReader := bytes.NewReader(pdfContent)
+			_, err := s.storageClient.UploadFile(ctx, io.NopCloser(pdfReader), pdfObjectName, "application/pdf")
+			if err != nil {
+				fmt.Printf("[WARNING] Failed to upload auto-generated PDF preview: %v\n", err)
+			} else {
+				template.GCSPathPDF = pdfObjectName
+				fmt.Printf("[INFO] Successfully auto-generated PDF preview for template %s\n", templateID)
+
+				// Generate thumbnail from PDF (try remote first)
+				var thumbnailContent []byte
+				thumbnailGenerated := false
+
+				if s.conversionService != nil && s.conversionService.IsThumbnailGenerationAvailable() {
+					fmt.Printf("[INFO] Generating thumbnail for template %s using remote service\n", templateID)
+					pdfTempFile, err := os.CreateTemp("", "*.pdf")
+					if err == nil {
+						pdfTempFile.Write(pdfContent)
+						pdfTempFile.Close()
+						defer os.Remove(pdfTempFile.Name())
+
+						thumbnailContent, err = s.conversionService.GenerateThumbnailFromPDFWithQuality(ctx, pdfTempFile.Name(), 600, ThumbnailQualityHD)
+						if err != nil {
+							fmt.Printf("[WARNING] Failed to generate thumbnail via remote service: %v\n", err)
+						} else {
+							thumbnailGenerated = true
+						}
 					}
 				}
 
-				// Upload generated PDF
-				pdfFileName := strings.TrimSuffix(docxHeader.Filename, filepath.Ext(docxHeader.Filename)) + ".pdf"
-				pdfObjectName := storage.GenerateObjectName(templateID, pdfFileName)
-				pdfReader := bytes.NewReader(pdfContent)
-				_, err := s.storageClient.UploadFile(ctx, io.NopCloser(pdfReader), pdfObjectName, "application/pdf")
-				if err != nil {
-					fmt.Printf("[WARNING] Failed to upload auto-generated PDF preview: %v\n", err)
-				} else {
-					template.GCSPathPDF = pdfObjectName
-					fmt.Printf("[INFO] Successfully auto-generated PDF preview for template %s\n", templateID)
-
-					// Generate thumbnail from PDF
-					if s.conversionService.IsThumbnailGenerationAvailable() {
-						fmt.Printf("[INFO] Generating thumbnail for template %s\n", templateID)
-						// Create temp PDF file for thumbnail generation
-						pdfTempFile, err := os.CreateTemp("", "*.pdf")
-						if err == nil {
-							pdfTempFile.Write(pdfContent)
-							pdfTempFile.Close()
-							defer os.Remove(pdfTempFile.Name())
-
-							thumbnailContent, err := s.conversionService.GenerateThumbnailFromPDFWithQuality(ctx, pdfTempFile.Name(), 600, ThumbnailQualityHD)
-							if err != nil {
-								fmt.Printf("[WARNING] Failed to generate thumbnail: %v\n", err)
-							} else {
-								// Delete old thumbnail
-								if template.GCSPathThumbnail != "" {
-									if err := s.storageClient.DeleteFile(ctx, template.GCSPathThumbnail); err != nil {
-										fmt.Printf("Warning: failed to delete old thumbnail %s: %v\n", template.GCSPathThumbnail, err)
-									}
-								}
-
-								// Upload thumbnail
-								thumbnailFileName := strings.TrimSuffix(docxHeader.Filename, filepath.Ext(docxHeader.Filename)) + "_thumb.png"
-								thumbnailObjectName := storage.GenerateObjectName(templateID, thumbnailFileName)
-								thumbnailReader := bytes.NewReader(thumbnailContent)
-								_, err := s.storageClient.UploadFile(ctx, io.NopCloser(thumbnailReader), thumbnailObjectName, "image/png")
-								if err != nil {
-									fmt.Printf("[WARNING] Failed to upload thumbnail: %v\n", err)
-								} else {
-									template.GCSPathThumbnail = thumbnailObjectName
-									fmt.Printf("[INFO] Successfully generated thumbnail for template %s\n", templateID)
-								}
-							}
+				// Upload thumbnail if generated
+				if thumbnailGenerated && len(thumbnailContent) > 0 {
+					// Delete old thumbnail
+					if template.GCSPathThumbnail != "" {
+						if err := s.storageClient.DeleteFile(ctx, template.GCSPathThumbnail); err != nil {
+							fmt.Printf("Warning: failed to delete old thumbnail %s: %v\n", template.GCSPathThumbnail, err)
 						}
+					}
+
+					// Upload thumbnail
+					thumbnailFileName := strings.TrimSuffix(docxHeader.Filename, filepath.Ext(docxHeader.Filename)) + "_thumb.png"
+					thumbnailObjectName := storage.GenerateObjectName(templateID, thumbnailFileName)
+					thumbnailReader := bytes.NewReader(thumbnailContent)
+					_, err := s.storageClient.UploadFile(ctx, io.NopCloser(thumbnailReader), thumbnailObjectName, "image/png")
+					if err != nil {
+						fmt.Printf("[WARNING] Failed to upload thumbnail: %v\n", err)
+					} else {
+						template.GCSPathThumbnail = thumbnailObjectName
+						fmt.Printf("[INFO] Successfully generated thumbnail for template %s\n", templateID)
 					}
 				}
 			}
