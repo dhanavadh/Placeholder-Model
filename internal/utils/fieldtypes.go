@@ -71,9 +71,10 @@ type FieldValidation struct {
 
 // RadioOption represents an option in a radio button group
 type RadioOption struct {
-	Placeholder string `json:"placeholder"` // The placeholder key (e.g., "$1", "$2")
-	Label       string `json:"label"`       // Display label (e.g., "Male", "Female")
-	Value       string `json:"value"`       // Value when selected (e.g., "/")
+	Placeholder string   `json:"placeholder"`           // The placeholder key (e.g., "$1", "$2")
+	Label       string   `json:"label"`                 // Display label (e.g., "Male", "Female")
+	Value       string   `json:"value"`                 // Value when selected (e.g., "/")
+	ChildFields []string `json:"childFields,omitempty"` // Child fields to show when this option is selected (e.g., ["$3_D"])
 }
 
 // FieldDefinition represents the complete definition of a field
