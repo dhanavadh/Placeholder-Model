@@ -2360,7 +2360,7 @@ func (s *OCRService) SuggestFieldTypes(placeholders []string, contexts []Placeho
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
-		"max_tokens":  4096,
+		"max_tokens":  16384, // Increased for large number of placeholders
 		"temperature": 0.3,
 	}
 
@@ -2538,7 +2538,7 @@ func (s *OCRService) SuggestFieldTypesWithDataTypes(placeholders []string, conte
 			{"role": "user", "content": prompt},
 		},
 		"temperature": 0.2,
-		"max_tokens":  4096,
+		"max_tokens":  16384, // Increased for large number of placeholders
 	}
 
 	reqBody, err := json.Marshal(chatReq)
