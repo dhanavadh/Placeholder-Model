@@ -265,6 +265,7 @@ func main() {
 
 		// Regenerate document from history
 		v1.POST("/documents/:documentId/regenerate", docxHandler.RegenerateDocument)
+		v1.POST("/regenerate/:documentId", docxHandler.RegenerateDocument) // Alternative path to avoid gateway route conflict
 
 		// Activity logs
 		v1.GET("/logs", logsHandler.GetAllLogs)
