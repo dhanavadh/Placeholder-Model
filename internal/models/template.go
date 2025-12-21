@@ -34,6 +34,14 @@ const (
 	// Add more tiers as needed
 )
 
+// PageOrientation represents the document page orientation
+type PageOrientation string
+
+const (
+	OrientationPortrait  PageOrientation = "portrait"
+	OrientationLandscape PageOrientation = "landscape"
+)
+
 type Template struct {
 	ID           string         `gorm:"primaryKey" json:"id"`
 	Filename     string         `gorm:"not null" json:"filename"`
@@ -69,6 +77,9 @@ type Template struct {
 	DocumentTypeID string        `gorm:"index" json:"document_type_id"` // FK to document_types table
 	VariantName    string        `json:"variant_name"`                   // Name of this variant (e.g., "ด้านหน้า", "ด้านหลัง")
 	VariantOrder   int           `gorm:"default:0" json:"variant_order"` // Display order within document type
+
+	// Page orientation (detected from DOCX)
+	PageOrientation PageOrientation `gorm:"type:varchar(20);default:'portrait'" json:"page_orientation"`
 
 	// Relations
 	DocumentType *DocumentType `gorm:"foreignKey:DocumentTypeID" json:"document_type,omitempty"`

@@ -341,6 +341,16 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 		return nil, fmt.Errorf("failed to extract placeholders: %w", err)
 	}
 
+	// Detect page orientation
+	pageOrientation := models.OrientationPortrait
+	isLandscape, err := proc.DetectOrientation()
+	if err != nil {
+		fmt.Printf("[WARNING] Failed to detect page orientation: %v\n", err)
+	} else if isLandscape {
+		pageOrientation = models.OrientationLandscape
+		fmt.Printf("[INFO] Detected landscape orientation for template %s\n", templateID)
+	}
+
 	// Convert placeholders to JSON
 	placeholdersJSON, err := json.Marshal(placeholders)
 	if err != nil {
@@ -372,6 +382,7 @@ func (s *TemplateService) UploadTemplateWithHTMLPreview(ctx context.Context, fil
 		MimeType:         header.Header.Get("Content-Type"),
 		Placeholders:     string(placeholdersJSON),
 		FieldDefinitions: string(fieldDefinitionsJSON),
+		PageOrientation:  pageOrientation,
 	}
 
 	// Convert aliases to JSON (if provided)
