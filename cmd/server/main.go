@@ -117,15 +117,9 @@ func main() {
 		log.Printf("Warning: Failed to initialize default entity rules: %v", err)
 	}
 
-	// Initialize default data types if none exist
-	if err := dataTypeService.InitializeDefaultDataTypes(); err != nil {
-		log.Printf("Warning: Failed to initialize default data types: %v", err)
-	}
-
-	// Initialize default input types if none exist
-	if err := inputTypeService.InitializeDefaultInputTypes(); err != nil {
-		log.Printf("Warning: Failed to initialize default input types: %v", err)
-	}
+	// NOTE: Data types and input types are NOT auto-initialized on startup
+	// They are managed entirely through the Console UI (/console?tab=datatypes)
+	// To initialize defaults, call POST /api/v1/data-types/initialize or /api/v1/input-types/initialize
 
 	// Initialize default filters if none exist
 	if err := filterService.InitializeDefaultFilters(); err != nil {

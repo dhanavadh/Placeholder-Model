@@ -109,5 +109,8 @@ func DefaultInputTypes() []InputType {
 		{Code: "textarea", Name: "Text Area", Description: "ช่องกรอกข้อความหลายบรรทัด", Priority: 50},
 		{Code: "checkbox", Name: "Checkbox", Description: "ช่องติ๊กถูก/ผิด", Priority: 55},
 		{Code: "merged", Name: "Merged Fields", Description: "ช่องรวมหลายค่า", Priority: 60},
+		{Code: "location", Name: "Location", Description: "Thai administrative boundary selection (ตำบล/อำเภอ/จังหวัด)", Priority: 65},
+		{Code: "radio", Name: "Radio Button", Description: "ตัวเลือกแบบ radio button", Priority: 70},
+		{Code: "digit", Name: "Digit Blocks", Description: "Digit block input with separators (OTP, License Plate)", Priority: 75},
 	}
 }

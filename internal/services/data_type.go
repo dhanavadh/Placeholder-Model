@@ -139,19 +139,31 @@ func (s *DataTypeService) InitializeDefaultDataTypes() error {
 			}
 			created++
 		} else {
-			// Exists and active, update with defaults (pattern, options, etc.)
-			updates := map[string]interface{}{
-				"pattern":     dt.Pattern,
-				"options":     dt.Options,
-				"input_type":  dt.InputType,
-				"description": dt.Description,
-				"priority":    dt.Priority,
-				"validation":  dt.Validation,
+			// Exists and active - DO NOT overwrite user-customizable fields (input_type, options, default_value)
+			// Only update system fields if they were empty/default
+			updates := map[string]interface{}{}
+
+			// Only update pattern if the existing one is empty
+			if existing.Pattern == "" && dt.Pattern != "" {
+				updates["pattern"] = dt.Pattern
 			}
-			if err := internal.DB.Model(&models.DataType{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
-				return fmt.Errorf("failed to update default data type %s: %w", dt.Code, err)
+			// Only update validation if the existing one is empty or "{}"
+			if (existing.Validation == "" || existing.Validation == "{}") && dt.Validation != "" && dt.Validation != "{}" {
+				updates["validation"] = dt.Validation
 			}
-			updated++
+			// Only update description if the existing one is empty
+			if existing.Description == "" && dt.Description != "" {
+				updates["description"] = dt.Description
+			}
+
+			// Skip updating: input_type, options, default_value, priority - these are user-customizable
+
+			if len(updates) > 0 {
+				if err := internal.DB.Model(&models.DataType{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+					return fmt.Errorf("failed to update default data type %s: %w", dt.Code, err)
+				}
+				updated++
+			}
 		}
 	}
 
@@ -275,16 +287,23 @@ func (s *InputTypeService) InitializeDefaultInputTypes() error {
 			}
 			created++
 		} else {
-			// Exists and active, update with defaults
-			updates := map[string]interface{}{
-				"name":        it.Name,
-				"description": it.Description,
-				"priority":    it.Priority,
+			// Exists and active - DO NOT overwrite user-customizable fields
+			// Only update system fields if they were empty/default
+			updates := map[string]interface{}{}
+
+			// Only update description if the existing one is empty
+			if existing.Description == "" && it.Description != "" {
+				updates["description"] = it.Description
 			}
-			if err := internal.DB.Model(&models.InputType{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
-				return fmt.Errorf("failed to update default input type %s: %w", it.Code, err)
+
+			// Skip updating: name, priority - these are user-customizable
+
+			if len(updates) > 0 {
+				if err := internal.DB.Model(&models.InputType{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+					return fmt.Errorf("failed to update default input type %s: %w", it.Code, err)
+				}
+				updated++
 			}
-			updated++
 		}
 	}
 
