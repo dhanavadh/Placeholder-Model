@@ -962,23 +962,6 @@ func (h *DocxHandler) ReplaceTemplateFiles(c *gin.Context) {
 	})
 }
 
-// Legacy functions for backward compatibility - these will be removed
-func UploadTemplate(c *gin.Context) {
-	c.JSON(http.StatusInternalServerError, gin.H{"error": "This endpoint is deprecated. Use dependency injection instead."})
-}
-
-func GetPlaceholders(c *gin.Context) {
-	c.JSON(http.StatusInternalServerError, gin.H{"error": "This endpoint is deprecated. Use dependency injection instead."})
-}
-
-func ProcessDocument(c *gin.Context) {
-	c.JSON(http.StatusInternalServerError, gin.H{"error": "This endpoint is deprecated. Use dependency injection instead."})
-}
-
-func DownloadDocument(c *gin.Context) {
-	c.JSON(http.StatusInternalServerError, gin.H{"error": "This endpoint is deprecated. Use dependency injection instead."})
-}
-
 // GetUserDocumentHistory returns the document history for the authenticated user
 func (h *DocxHandler) GetUserDocumentHistory(c *gin.Context) {
 	// Get user ID from X-User-ID header (set by API gateway)
